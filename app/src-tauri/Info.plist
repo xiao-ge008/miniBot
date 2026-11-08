@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>miniBot 需要屏幕录制权限，以便提供区域截图、OCR 文字识别与屏幕取色功能。</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>miniBot 需要自动化控制权限，以便支持划词取词、替换原文与系统对话框交互。</string>
+</dict>
+</plist>

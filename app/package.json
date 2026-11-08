@@ -1,6 +1,6 @@
 {
   "name": "minibot",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "miniBot - 轻量级跨平台桌面 AI 效率工具",
   "type": "module",
   "scripts": {

@@ -8,6 +8,7 @@ mod gateway;
 mod gpu;
 mod history;
 mod hotkeys;
+mod imgsearch;
 mod imgutil;
 mod jobobj;
 mod llm;
@@ -188,6 +189,8 @@ pub fn run() {
             commands::qr_decode,
             commands::qr_encode,
             commands::pin_image,
+            commands::image_search,
+            commands::fetch_remote_image,
             commands::history_add,
             commands::history_list,
             commands::history_delete,

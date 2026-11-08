@@ -55,6 +55,14 @@ pub struct LlmSettings {
     pub api_vision: bool,
 }
 
+pub fn default_server_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
 impl Default for LlmSettings {
     fn default() -> Self {
         let base = default_engine_dir();
@@ -72,7 +80,7 @@ impl Default for LlmSettings {
             )
         };
         Self {
-            server_path: base.join("llama-server.exe").to_string_lossy().into(),
+            server_path: base.join(default_server_bin_name()).to_string_lossy().into(),
             models_dir: models_dir.to_string_lossy().into(),
             model_path: default_model.to_string_lossy().into(),
             mmproj_path: default_mmproj.to_string_lossy().into(),
@@ -92,7 +100,7 @@ impl Default for LlmSettings {
     }
 }
 
-/// 定位默认引擎目录（优先可执行文件所在目录及上级目录，回退工作目录）
+/// 定位默认引擎目录（优先可执行文件所在目录及上级目录，macOS .app 下回退 Application Support 目录）
 pub fn default_engine_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(p) = find_llama_dir(&exe) {
@@ -102,6 +110,12 @@ pub fn default_engine_dir() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(p) = find_llama_dir(&cwd) {
             return p;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(data_dir) = dirs::data_local_dir() {
+            return data_dir.join("com.minibot.app").join("llama");
         }
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -117,7 +131,10 @@ fn find_llama_dir(start: &std::path::Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {
         let cand = dir.join("llama");
-        if cand.join("llama-server.exe").exists() || cand.join("models").exists() {
+        if cand.join("llama-server.exe").exists()
+            || cand.join("llama-server").exists()
+            || cand.join("models").exists()
+        {
             return Some(cand);
         }
         cur = dir.parent();
@@ -278,6 +295,11 @@ impl SettingsStore {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let def_llm = LlmSettings::default();
+        if inner.llm.server_path.trim().is_empty()
+            || (!cfg!(windows) && inner.llm.server_path.to_lowercase().ends_with(".exe"))
+        {
+            inner.llm.server_path = def_llm.server_path;
+        }
         if inner.llm.models_dir.trim().is_empty() {
             inner.llm.models_dir = def_llm.models_dir;
         }

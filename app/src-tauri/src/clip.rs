@@ -71,6 +71,19 @@ pub fn set_text_retry(text: String) -> bool {
     false
 }
 
+fn is_self_or_blacklisted(fg: &str, blacklist: &[String]) -> bool {
+    let f = fg.trim().to_lowercase();
+    let f_stem = f.trim_end_matches(".exe").trim_end_matches(".app");
+    if f_stem == "minibot" {
+        return true;
+    }
+    blacklist.iter().any(|b| {
+        let bl = b.trim().to_lowercase();
+        let bl_stem = bl.trim_end_matches(".exe").trim_end_matches(".app");
+        !bl_stem.is_empty() && (bl == f || bl_stem == f_stem)
+    })
+}
+
 impl ClipWatcher {
     pub fn pause_for(&self, secs: u64) {
         self.paused_until.store(if secs == 0 { 0 } else { now() + secs }, Ordering::SeqCst);
@@ -111,7 +124,7 @@ impl ClipWatcher {
                     continue;
                 }
                 let fg = crate::winutil::foreground_process().unwrap_or_default().to_lowercase();
-                if fg == "minibot.exe" || tip.blacklist.iter().any(|b| b.to_lowercase() == fg) {
+                if is_self_or_blacklisted(&fg, &tip.blacklist) {
                     continue;
                 }
                 // 稍等浏览器/编辑器完成多格式写入，并带重试读取
@@ -174,8 +187,7 @@ impl ClipWatcher {
                     // 鼠标左键刚按下：若点击在 Tip 窗口外，立即隐藏 Tip
                     if let Some(tip_win) = app.get_webview_window("tip") {
                         if tip_win.is_visible().unwrap_or(false) {
-                            let th = crate::wins::hwnd_of(&tip_win);
-                            if !crate::winutil::point_in_hwnd(th, pos.0, pos.1) {
+                            if !crate::wins::point_in_win(&tip_win, pos.0, pos.1) {
                                 let _ = tip_win.hide();
                             }
                         }
@@ -189,8 +201,7 @@ impl ClipWatcher {
                         for label in ["launcher", "result"] {
                             if let Some(win) = app.get_webview_window(label) {
                                 if win.is_visible().unwrap_or(false) {
-                                    let wh = crate::wins::hwnd_of(&win);
-                                    if !crate::winutil::point_in_hwnd(wh, pos.0, pos.1) {
+                                    if !crate::wins::point_in_win(&win, pos.0, pos.1) {
                                         let _ = app.emit_to(label, "minibot://outside-click", ());
                                     }
                                 }
@@ -231,7 +242,7 @@ impl ClipWatcher {
                         continue;
                     }
                     let fg = crate::winutil::foreground_process().unwrap_or_default().to_lowercase();
-                    if fg.is_empty() || fg == "minibot.exe" || tip.blacklist.iter().any(|b| b.to_lowercase() == fg) {
+                    if fg.is_empty() || is_self_or_blacklisted(&fg, &tip.blacklist) {
                         continue;
                     }
 

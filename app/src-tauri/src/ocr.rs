@@ -99,7 +99,133 @@ pub fn recognize(img: &RgbaImage) -> anyhow::Result<OcrResult> {
     Ok(OcrResult { text, lines, lang })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn recognize(img: &RgbaImage) -> anyhow::Result<OcrResult> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static OCR_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Ok(OcrResult {
+            text: String::new(),
+            lines: vec![],
+            lang: "zh-Hans".into(),
+        });
+    }
+
+    let seq = OCR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = std::env::temp_dir().join(format!("minibot_ocr_{}_{}.png", std::process::id(), seq));
+    let png_bytes = crate::imgutil::encode_png(img);
+    std::fs::write(&tmp_path, png_bytes)?;
+
+    // 调用 macOS 系统内置 JXA Objective-C Bridge 驱动 Apple Vision Framework (VNRecognizeTextRequest)
+    let jxa_script = r#"
+ObjC.import('Foundation');
+ObjC.import('Vision');
+
+function run(argv) {
+    var imgPath = argv[0];
+    var url = $.NSURL.fileURLWithPath(imgPath);
+    var req = $.VNRecognizeTextRequest.alloc.init;
+    req.recognitionLevel = 0; // VNRequestTextRecognitionLevelAccurate
+    req.usesLanguageCorrection = true;
+    try {
+        req.recognitionLanguages = $(["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]);
+    } catch (e) {}
+    var handler = $.VNImageRequestHandler.alloc.initWithURLOptions(url, $({}));
+    var err = Ref();
+    var ok = handler.performRequestsError($([req]), err);
+    if (!ok) {
+        return "[]";
+    }
+    var results = req.results;
+    var out = [];
+    if (results) {
+        var count = results.count;
+        for (var i = 0; i < count; i++) {
+            var obs = results.objectAtIndex(i);
+            var cand = obs.topCandidates(1);
+            if (cand && cand.count > 0) {
+                var str = ObjC.unwrap(cand.objectAtIndex(0).string);
+                var box = obs.boundingBox;
+                out.push({
+                    text: str,
+                    nx: Number(box.origin.x),
+                    ny: Number(1.0 - box.origin.y - box.size.height),
+                    nw: Number(box.size.width),
+                    nh: Number(box.size.height)
+                });
+            }
+        }
+    }
+    return JSON.stringify(out);
+}
+"#;
+
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", jxa_script, &tmp_path.to_string_lossy()])
+        .output();
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let out = out?;
+    if !out.status.success() {
+        return Ok(OcrResult {
+            text: String::new(),
+            lines: vec![],
+            lang: "zh-Hans".into(),
+        });
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RawBox {
+        text: String,
+        nx: f32,
+        ny: f32,
+        nw: f32,
+        nh: f32,
+    }
+
+    let json_str = String::from_utf8_lossy(&out.stdout);
+    let raw_list: Vec<RawBox> = serde_json::from_str(json_str.trim()).unwrap_or_default();
+    let wf = w as f32;
+    let hf = h as f32;
+
+    let mut lines: Vec<OcrLine> = raw_list
+        .into_iter()
+        .filter_map(|item| {
+            let t = tidy_cjk(item.text.trim());
+            if t.is_empty() {
+                return None;
+            }
+            Some(OcrLine {
+                text: t,
+                x: (item.nx * wf).max(0.0),
+                y: (item.ny * hf).max(0.0),
+                w: (item.nw * wf).max(1.0),
+                h: (item.nh * hf).max(1.0),
+            })
+        })
+        .collect();
+
+    // 按从上到下、同行从左到右排序
+    lines.sort_by(|a, b| {
+        let row_tol = (a.h.min(b.h) * 0.5).max(6.0);
+        if (a.y - b.y).abs() <= row_tol {
+            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    let text = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    Ok(OcrResult {
+        text,
+        lines,
+        lang: "zh-Hans".into(),
+    })
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn recognize(_img: &RgbaImage) -> anyhow::Result<OcrResult> {
     Ok(OcrResult {
         text: String::new(),

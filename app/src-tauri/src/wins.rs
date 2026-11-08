@@ -18,6 +18,32 @@ pub fn hwnd_of(w: &WebviewWindow) -> isize {
     }
 }
 
+/// 跨平台判断屏幕坐标 (x, y) 是否在指定窗口矩形内（Windows 走物理像素 HWND，macOS 走逻辑点坐标）
+pub fn point_in_win(w: &WebviewWindow, x: i32, y: i32) -> bool {
+    #[cfg(windows)]
+    {
+        crate::winutil::point_in_hwnd(hwnd_of(w), x, y)
+    }
+    #[cfg(not(windows))]
+    {
+        if !w.is_visible().unwrap_or(false) {
+            return false;
+        }
+        let Ok(pos) = w.outer_position() else {
+            return false;
+        };
+        let Ok(size) = w.outer_size() else {
+            return false;
+        };
+        let scale = w.scale_factor().unwrap_or(1.0).max(1.0);
+        let lx = (pos.x as f64 / scale).round() as i32;
+        let ly = (pos.y as f64 / scale).round() as i32;
+        let lw = (size.width as f64 / scale).round() as i32;
+        let lh = (size.height as f64 / scale).round() as i32;
+        x >= lx && x <= lx + lw && y >= ly && y <= ly + lh
+    }
+}
+
 /// 存放待取走的 Payload，并通知对应窗口
 pub fn deliver(app: &AppHandle, label: &str, p: Payload) {
     let st = app.state::<crate::AppState>();
@@ -124,42 +150,85 @@ pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 把窗口放到光标附近并限制在当前显示器内
+/// 把窗口放到光标附近并限制在当前显示器内（兼容 Windows 物理像素与 macOS Retina 逻辑点坐标）
 fn place_near_cursor(w: &WebviewWindow, dx: i32, dy: i32) {
     let (cx, cy) = crate::winutil::cursor_pos();
     let size = w.outer_size().unwrap_or_default();
-    let sw = (size.width as i32).max(260);
-    let sh = (size.height as i32).max(48);
-    let mut x = cx + dx;
-    let mut y = cy + dy;
     let mon = w
         .monitor_from_point(cx as f64, cy as f64)
         .ok()
         .flatten()
         .or_else(|| w.current_monitor().ok().flatten())
         .or_else(|| w.primary_monitor().ok().flatten());
-    if let Some(m) = mon {
-        let mp = m.position();
-        let ms = m.size();
-        let right = mp.x + ms.width as i32;
-        let bottom = mp.y + ms.height as i32;
-        if x + sw > right - 8 {
-            x = right - sw - 8;
+
+    #[cfg(target_os = "macos")]
+    {
+        let scale = mon
+            .as_ref()
+            .map(|m| m.scale_factor())
+            .or_else(|| w.scale_factor().ok())
+            .unwrap_or(1.0)
+            .max(1.0);
+        let sw = ((size.width as f64 / scale).round() as i32).max(260);
+        let sh = ((size.height as f64 / scale).round() as i32).max(48);
+        let mut x = cx + dx;
+        let mut y = cy + dy;
+        if let Some(m) = mon {
+            let mp = m.position();
+            let ms = m.size();
+            let mp_x = (mp.x as f64 / scale).round() as i32;
+            let mp_y = (mp.y as f64 / scale).round() as i32;
+            let ms_w = (ms.width as f64 / scale).round() as i32;
+            let ms_h = (ms.height as f64 / scale).round() as i32;
+            let right = mp_x + ms_w;
+            let bottom = mp_y + ms_h;
+            if x + sw > right - 8 {
+                x = right - sw - 8;
+            }
+            if x < mp_x + 8 {
+                x = mp_x + 8;
+            }
+            if y < mp_y + 8 {
+                y = cy + 22;
+            }
+            if y + sh > bottom - 8 {
+                y = cy - sh - 14;
+            }
+            x = x.max(mp_x + 8);
+            y = y.max(mp_y + 8);
         }
-        if x < mp.x + 8 {
-            x = mp.x + 8;
-        }
-        if y < mp.y + 8 {
-            // 上方空间不足时自动放到光标下方
-            y = cy + 22;
-        }
-        if y + sh > bottom - 8 {
-            y = cy - sh - 14;
-        }
-        x = x.max(mp.x + 8);
-        y = y.max(mp.y + 8);
+        let _ = w.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
     }
-    let _ = w.set_position(PhysicalPosition::new(x, y));
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let sw = (size.width as i32).max(260);
+        let sh = (size.height as i32).max(48);
+        let mut x = cx + dx;
+        let mut y = cy + dy;
+        if let Some(m) = mon {
+            let mp = m.position();
+            let ms = m.size();
+            let right = mp.x + ms.width as i32;
+            let bottom = mp.y + ms.height as i32;
+            if x + sw > right - 8 {
+                x = right - sw - 8;
+            }
+            if x < mp.x + 8 {
+                x = mp.x + 8;
+            }
+            if y < mp.y + 8 {
+                // 上方空间不足时自动放到光标下方
+                y = cy + 22;
+            }
+            if y + sh > bottom - 8 {
+                y = cy - sh - 14;
+            }
+            x = x.max(mp.x + 8);
+            y = y.max(mp.y + 8);
+        }
+        let _ = w.set_position(PhysicalPosition::new(x, y));
+    }
 }
 
 pub fn show_tip(app: &AppHandle, p: Payload) {
@@ -196,12 +265,19 @@ pub fn open_result(app: &AppHandle, p: Payload) {
         hide(&app2, "tip");
         let Some(w) = get_or_build(&app2, "result") else { return };
         let was_visible = w.is_visible().unwrap_or(false);
-        if !was_visible {
+        let is_img_search = p.meta.get("action").and_then(|v| v.as_str()) == Some("image_search");
+        if !was_visible || is_img_search {
             let ui = app2.state::<crate::AppState>().settings.get().ui;
-            let rw = ui.result_width.clamp(360.0, 1400.0);
-            let rh = ui.result_height.clamp(240.0, 1200.0);
+            let mut rw = ui.result_width.clamp(360.0, 1400.0);
+            let mut rh = ui.result_height.clamp(240.0, 1200.0);
+            if is_img_search {
+                rw = rw.max(660.0);
+                rh = rh.max(580.0);
+            }
             let _ = w.set_size(tauri::LogicalSize::new(rw, rh));
-            place_near_cursor(&w, 16, 20);
+            if !was_visible {
+                place_near_cursor(&w, 16, 20);
+            }
         }
         deliver(&app2, "result", p);
         let _ = w.show();

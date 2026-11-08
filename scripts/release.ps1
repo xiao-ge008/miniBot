@@ -68,7 +68,14 @@ $cargoContent = [System.IO.File]::ReadAllText($CargoTomlPath, $utf8NoBom)
 $cargoContent = [regex]::Replace($cargoContent, '(?m)^version\s*=\s*"[^"]+"', "version = `"$newVer`"", 1)
 [System.IO.File]::WriteAllText($CargoTomlPath, $cargoContent, $utf8NoBom)
 
-Write-Host "[1/3] 已同步更新 package.json / tauri.conf.json / Cargo.toml 版本号为 $newVer" -ForegroundColor Green
+$CargoLockPath = Join-Path $RootDir "app\src-tauri\Cargo.lock"
+if (Test-Path $CargoLockPath) {
+    $lockContent = [System.IO.File]::ReadAllText($CargoLockPath, $utf8NoBom)
+    $lockContent = [regex]::Replace($lockContent, '(?ms)(name\s*=\s*"minibot"\r?\nversion\s*=\s*)"[^"]+"', "`${1}`"$newVer`"", 1)
+    [System.IO.File]::WriteAllText($CargoLockPath, $lockContent, $utf8NoBom)
+}
+
+Write-Host "[1/3] 已同步更新 package.json / tauri.conf.json / Cargo.toml / Cargo.lock 版本号为 $newVer" -ForegroundColor Green
 
 # 4. Git 提交并打 Tag
 git add .

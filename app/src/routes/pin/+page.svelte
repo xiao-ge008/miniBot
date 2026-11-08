@@ -96,7 +96,7 @@
       flash('已复制图片');
     } else if (id === 'save') {
       const p = await ipc.saveImage(src);
-      flash(`已保存 ${p}`);
+      if (p) flash(`已保存 ${p}`);
     } else if (id === 'mirror') {
       mirror = !mirror;
     } else if (id === 'reset') {

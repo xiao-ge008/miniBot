@@ -126,6 +126,20 @@ fn system_ram_gb() -> f64 {
 
 #[cfg(not(windows))]
 fn system_ram_gb() -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+        {
+            if let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                if bytes > 0 {
+                    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    return (gb * 10.0).round() / 10.0;
+                }
+            }
+        }
+    }
     16.0
 }
 
@@ -188,7 +202,28 @@ fn detect_cpu_name() -> String {
 
 #[cfg(not(windows))]
 fn detect_cpu_name() -> String {
-    "Apple Silicon / 通用处理器".into()
+    static CACHED_CPU: OnceLock<String> = OnceLock::new();
+    CACHED_CPU
+        .get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(out) = std::process::Command::new("sysctl")
+                    .args(["-n", "machdep.cpu.brand_string"])
+                    .output()
+                {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+            if cfg!(target_arch = "aarch64") {
+                "Apple Silicon 处理器".into()
+            } else {
+                "通用多核处理器".into()
+            }
+        })
+        .clone()
 }
 
 /// 当 NVML 未检测到 NVIDIA 显卡时，通过注册表 64 位显存字段 + WMI 检测 AMD / Intel 显卡型号与真实显存（突破 WMI 4GB 溢出限制，并自动在核显+独显中选出最强显卡）
@@ -197,7 +232,18 @@ fn detect_non_nvidia_gpu() -> (String, String, f64) {
         .get_or_init(|| {
             #[cfg(target_os = "macos")]
             {
-                return ("Apple Silicon 统一内存架构".into(), "apple".into(), 8.0);
+                let cpu = detect_cpu_name();
+                let ram = system_ram_gb();
+                if cfg!(target_arch = "aarch64") || cpu.to_lowercase().contains("apple") {
+                    // Apple Silicon 统一内存架构：Metal 可调度约 75% 系统内存作为显存
+                    let metal_vram = ((ram * 0.75) * 10.0).round() / 10.0;
+                    return (
+                        format!("{cpu} GPU (统一内存)"),
+                        "apple".into(),
+                        metal_vram.max(4.0),
+                    );
+                }
+                return ("macOS Metal 图形加速".into(), "apple".into(), 4.0);
             }
             #[cfg(windows)]
             {
@@ -439,7 +485,7 @@ fn file_size_gb_label(p: &Path, fallback: &str) -> String {
 }
 
 fn norm_path(p: &str) -> String {
-    p.replace('/', "\\").trim().to_lowercase()
+    p.replace('\\', "/").trim().to_lowercase()
 }
 
 pub async fn get_overview(app: &AppHandle) -> EngineOverview {
@@ -707,6 +753,10 @@ pub async fn activate_model(app: &AppHandle, model_id: &str) -> anyhow::Result<E
 // ---------- 选择新模型目录（原生 Win32 置顶文件夹对话框，绝不被设置窗口遮挡）并自动迁移/识别模型 ----------
 
 pub fn pick_folder_dialog(initial_dir: &str) -> Option<String> {
+    pick_folder_dialog_with_title(initial_dir, "选择模型存放文件夹（将自动识别或转移模型）")
+}
+
+pub fn pick_folder_dialog_with_title(initial_dir: &str, title: &str) -> Option<String> {
     #[cfg(windows)]
     {
         use std::ffi::OsStr;
@@ -781,7 +831,7 @@ pub fn pick_folder_dialog(initial_dir: &str) -> Option<String> {
             let _ = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
             let owner = GetForegroundWindow();
             let mut display_buf = [0u16; 260];
-            let title_wide: Vec<u16> = OsStr::new("选择模型存放文件夹（将自动识别或转移模型）")
+            let title_wide: Vec<u16> = OsStr::new(title)
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
@@ -826,10 +876,11 @@ pub fn pick_folder_dialog(initial_dir: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         let _ = initial_dir;
+        let safe_title = title.replace('"', "\\\"");
         if let Ok(out) = std::process::Command::new("osascript")
             .args([
                 "-e",
-                "POSIX path of (choose folder with prompt \"选择模型存放文件夹（将自动识别或转移模型）\")",
+                &format!("POSIX path of (choose folder with prompt \"{safe_title}\")"),
             ])
             .output()
         {
@@ -842,7 +893,7 @@ pub fn pick_folder_dialog(initial_dir: &str) -> Option<String> {
         }
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = initial_dir;
+    let _ = (initial_dir, title);
     None
 }
 
@@ -1285,7 +1336,14 @@ fn match_engine_asset_name(name: &str, target_backend: &str) -> bool {
                 && !n.contains("cudart")
         }
         "vulkan" => n.ends_with(".zip") && n.contains("bin-win-vulkan-x64"),
-        "metal" => (n.ends_with(".zip") || n.ends_with(".tar.gz")) && n.contains("bin-macos-arm64"),
+        "metal" => {
+            let arch_tag = if cfg!(target_arch = "x86_64") {
+                "bin-macos-x64"
+            } else {
+                "bin-macos-arm64"
+            };
+            (n.ends_with(".zip") || n.ends_with(".tar.gz")) && n.contains(arch_tag)
+        }
         _ => n.ends_with(".zip") && (n.contains("bin-win-cpu-x64") || n.contains("bin-win-avx2-x64")),
     }
 }
@@ -1295,6 +1353,7 @@ async fn resolve_engine_release_urls(
     target_backend: &str,
 ) -> (String, String, Option<(String, String)>) {
     let fallback_tag = "b12194";
+    let macos_arch = if cfg!(target_arch = "x86_64") { "x64" } else { "arm64" };
     let fallback = match target_backend {
         "cuda" => (
             format!("llama-{fallback_tag}-bin-win-cuda-12.4-x64.zip"),
@@ -1310,8 +1369,8 @@ async fn resolve_engine_release_urls(
             None,
         ),
         "metal" => (
-            format!("llama-{fallback_tag}-bin-macos-arm64.tar.gz"),
-            format!("https://github.com/ggml-org/llama.cpp/releases/download/{fallback_tag}/llama-{fallback_tag}-bin-macos-arm64.tar.gz"),
+            format!("llama-{fallback_tag}-bin-macos-{macos_arch}.tar.gz"),
+            format!("https://github.com/ggml-org/llama.cpp/releases/download/{fallback_tag}/llama-{fallback_tag}-bin-macos-{macos_arch}.tar.gz"),
             None,
         ),
         _ => (
@@ -1468,24 +1527,45 @@ fn extract_archive_to_dir(archive_path: &Path, engine_dir: &Path) -> anyhow::Res
         }
     }
 
-    // 若压缩包内部带有子目录（如 build/bin/llama-server.exe），自动将其内部文件提升至 engine_dir 根目录
+    // 若压缩包内部带有子目录（如 build/bin/llama-server），自动将其内部文件及动态库软链接提升至 engine_dir 根目录
     let server_bin = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
     if !engine_dir.join(server_bin).exists() {
-        for sub in ["build/bin", "bin", "llama"] {
+        for sub in ["build/bin", "bin", "llama", "llama-b"] {
             let sub_dir = engine_dir.join(sub);
             if sub_dir.join(server_bin).exists() {
                 if let Ok(rd) = std::fs::read_dir(&sub_dir) {
                     for entry in rd.flatten() {
                         let p = entry.path();
-                        if p.is_file() {
-                            if let Some(fname) = p.file_name() {
-                                let _ = std::fs::rename(&p, engine_dir.join(fname));
-                            }
+                        if let Some(fname) = p.file_name() {
+                            let dst = engine_dir.join(fname);
+                            let _ = std::fs::remove_file(&dst);
+                            let _ = std::fs::rename(&p, &dst);
                         }
                     }
                 }
                 break;
             }
+        }
+    }
+
+    // macOS / Linux 下赋予 llama-server 与动态库可执行权限，并清除 macOS Gatekeeper 隔离属性 (com.apple.quarantine)
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_path = engine_dir.join(server_bin);
+        if let Ok(meta) = std::fs::metadata(&bin_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&bin_path, perms);
+        }
+        let _ = std::process::Command::new("chmod")
+            .args(["-R", "+x", &engine_dir.to_string_lossy()])
+            .output();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("xattr")
+                .args(["-cr", &engine_dir.to_string_lossy()])
+                .output();
         }
     }
     Ok(())

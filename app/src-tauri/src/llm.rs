@@ -370,6 +370,11 @@ impl LlmManager {
             .stdout(log.try_clone()?)
             .stderr(log)
             .kill_on_drop(true);
+        #[cfg(target_os = "macos")]
+        {
+            cmd.env("DYLD_LIBRARY_PATH", engine_dir)
+                .env("GGML_METAL_PATH_RESOURCES", engine_dir);
+        }
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 

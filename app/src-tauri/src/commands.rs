@@ -353,13 +353,68 @@ pub async fn copy_image(st: State<'_, AppState>, data: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn save_image(st: State<'_, AppState>, data: String) -> R<String> {
-    let dir = std::path::PathBuf::from(st.settings.get().save_dir);
+pub async fn save_image(app: AppHandle, st: State<'_, AppState>, data: String) -> R<String> {
+    let cur_dir = st.settings.get().save_dir;
+    let _ = std::fs::create_dir_all(&cur_dir);
+    let cap_win = app.get_webview_window("capture");
+    let cap_was_visible = cap_win
+        .as_ref()
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if cap_was_visible {
+        if let Some(w) = &cap_win {
+            let _ = w.set_always_on_top(false);
+        }
+    }
+    let res_win = app.get_webview_window("result");
+    let res_was_aot = res_win
+        .as_ref()
+        .and_then(|w| w.is_always_on_top().ok())
+        .unwrap_or(false);
+    if res_was_aot {
+        if let Some(w) = &res_win {
+            let _ = w.set_always_on_top(false);
+        }
+    }
+    let picked = tokio::task::spawn_blocking(move || {
+        crate::engine::pick_folder_dialog_with_title(&cur_dir, "选择图片保存文件夹")
+    })
+    .await
+    .map_err(e)?;
+
+    if res_was_aot {
+        if let Some(w) = &res_win {
+            let _ = w.set_always_on_top(true);
+            let _ = w.set_focus();
+        }
+    }
+
+    let Some(dir_str) = picked else {
+        if cap_was_visible {
+            if let Some(w) = &cap_win {
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_focus();
+            }
+        }
+        return Ok(String::new());
+    };
+
+    let dir = std::path::PathBuf::from(&dir_str);
     std::fs::create_dir_all(&dir).map_err(e)?;
-    let name = format!("miniBot_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-    let path = dir.join(name);
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let mut path = dir.join(format!("miniBot_{ts}.png"));
+    if path.exists() {
+        let ms = chrono::Local::now().timestamp_subsec_millis();
+        path = dir.join(format!("miniBot_{ts}_{ms:03}.png"));
+    }
     let bytes = crate::imgutil::decode_b64(&data).map_err(e)?;
     std::fs::write(&path, bytes).map_err(e)?;
+
+    let mut s = st.settings.get();
+    if s.save_dir != dir_str {
+        s.save_dir = dir_str;
+        let _ = st.settings.set(s);
+    }
     Ok(path.to_string_lossy().into())
 }
 
@@ -383,6 +438,16 @@ pub fn qr_encode(text: String, ec: String, dark: String, light: String) -> R<Str
 #[tauri::command]
 pub fn pin_image(app: AppHandle, data: String, x: i32, y: i32, w: f64, h: f64) {
     crate::wins::open_pin(&app, data, x, y, w, h);
+}
+
+#[tauri::command]
+pub async fn image_search(data: String, engine: Option<String>) -> R<crate::imgsearch::ImageSearchResponse> {
+    crate::imgsearch::search_by_image(&data, engine.as_deref().unwrap_or("baidu")).await
+}
+
+#[tauri::command]
+pub async fn fetch_remote_image(url: String) -> R<String> {
+    crate::imgsearch::fetch_remote_as_data_uri(&url).await
 }
 
 // ---------- 历史 ----------

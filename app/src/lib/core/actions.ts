@@ -84,12 +84,21 @@ export function loadActions(): Promise<void> {
     // ---- 本地动作（不需要模型） ----
     register({ id: 'ocr', label: '识别文字', icon: '🔤', accepts: ['image'], surfaces: ['tip', 'capture'], order: 1, view: 'ocr' });
     register({
+      id: 'image_search',
+      label: '以图搜图',
+      icon: '🔍',
+      accepts: ['image'],
+      surfaces: ['tip', 'capture', 'more'],
+      order: 2,
+      view: 'image_search',
+    });
+    register({
       id: 'qr',
       label: '识别二维码',
       icon: '▣',
       accepts: ['image'],
       surfaces: ['tip', 'capture'],
-      order: 2,
+      order: 3,
       view: 'qr',
       when: (p) => p.origin === 'capture' || (p.meta?.qr?.length ?? 0) > 0,
     });

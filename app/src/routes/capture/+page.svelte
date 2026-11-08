@@ -26,11 +26,11 @@
     ['#232526', '#414345'],
   ];
   const TOOLS: { id: Tool; icon: string; label: string }[] = [
-    { id: 'rect', icon: '▭', label: '矩形' },
-    { id: 'ellipse', icon: '◯', label: '椭圆' },
-    { id: 'arrow', icon: '➜', label: '箭头' },
+    { id: 'rect', icon: '▭', label: '画框' },
     { id: 'pen', icon: '✎', label: '画笔' },
     { id: 'text', icon: 'T', label: '文字' },
+    { id: 'arrow', icon: '➜', label: '箭头' },
+    { id: 'ellipse', icon: '◯', label: '椭圆' },
     { id: 'number', icon: '①', label: '序号' },
     { id: 'mosaic', icon: '▦', label: '马赛克' },
     { id: 'blur', icon: '◌', label: '模糊' },
@@ -54,10 +54,12 @@
   let sel = $state<Rect | null>(null);
   let hoverWin: Rect | null = null;
   let tool = $state<Tool | null>(null);
+  let activeTool = $state<Tool>('rect');
+  let toolMenuOpen = $state(false);
   let color = $state(COLORS[0]);
   let sizeIdx = $state(1);
   let shapes = $state.raw<Shape[]>([]);
-  let redoStack: Shape[] = [];
+  let redoStack = $state.raw<Shape[]>([]);
   let drawing: Shape | null = null;
   let mouse = { x: 0, y: 0 };
   let down = { x: 0, y: 0 };
@@ -339,6 +341,7 @@
 
   // ---------- 鼠标 ----------
   function onDown(e: MouseEvent) {
+    if (toolMenuOpen) toolMenuOpen = false;
     if (e.button === 2) return;
     const p = toPhys(e);
     if (textEdit) {
@@ -482,18 +485,18 @@
   function undo() {
     if (textEdit) commitText();
     if (!shapes.length) return;
-    redoStack.push(shapes[shapes.length - 1]);
+    redoStack = [...redoStack, shapes[shapes.length - 1]];
     shapes = shapes.slice(0, -1);
     render();
   }
 
   function redo() {
     if (textEdit) commitText();
-    const s = redoStack.pop();
-    if (s) {
-      shapes = [...shapes, s];
-      render();
-    }
+    if (!redoStack.length) return;
+    const s = redoStack[redoStack.length - 1];
+    redoStack = redoStack.slice(0, -1);
+    shapes = [...shapes, s];
+    render();
   }
 
   function commitText() {
@@ -586,6 +589,7 @@
   async function act(id: string) {
     if (!sel) return;
     if (textEdit) commitText();
+    toolMenuOpen = false;
     let data = '';
     try {
       const useBeauty =
@@ -629,10 +633,11 @@
         close();
         await ipc.copyImage(data);
         break;
-      case 'save':
-        close();
-        await ipc.saveImage(data);
+      case 'save': {
+        const saved = await ipc.saveImage(data);
+        if (saved) close();
         break;
+      }
       case 'pin': {
         const px = originX + Math.round(sel.x);
         const py = originY + Math.round(sel.y);
@@ -672,6 +677,7 @@
     sel = null;
     shapes = [];
     tool = null;
+    toolMenuOpen = false;
     textEdit = null;
     sizeEdit = false;
     beautify = false;
@@ -682,6 +688,10 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (toolMenuOpen && e.key === 'Escape') {
+      toolMenuOpen = false;
+      return;
+    }
     if (textEdit) {
       if (e.key === 'Escape') textEdit = null;
       return;
@@ -691,12 +701,13 @@
       return;
     }
     const key = e.key.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
     if (e.key === 'Escape') close();
-    else if (e.ctrlKey && key === 'z' && !e.shiftKey) undo();
-    else if (e.ctrlKey && (key === 'y' || (key === 'z' && e.shiftKey))) redo();
-    else if (e.ctrlKey && key === 'c' && sel) act('copy');
+    else if (mod && key === 'z' && !e.shiftKey) undo();
+    else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) redo();
+    else if (mod && key === 'c' && sel) act('copy');
     else if (e.key === 'Enter' && sel) act(mode === 'chat' ? 'attach_chat' : 'copy');
-    else if (key === 'c' && !e.ctrlKey) copyColor(e.shiftKey);
+    else if (key === 'c' && !mod) copyColor(e.shiftKey);
     else if (key === 'f' && mode !== 'color') {
       sel = { x: 0, y: 0, w: W, h: H };
       phase = 'selected';
@@ -727,6 +738,10 @@
 
   function onContext(e: MouseEvent) {
     e.preventDefault();
+    if (toolMenuOpen) {
+      toolMenuOpen = false;
+      return;
+    }
     if (textEdit) {
       commitText();
       return;
@@ -759,6 +774,8 @@
     shapes = [];
     redoStack = [];
     tool = null;
+    activeTool = 'rect';
+    toolMenuOpen = false;
     beautify = false;
     sizeEdit = false;
     qrCount = 0;
@@ -767,15 +784,23 @@
       URL.revokeObjectURL(prevBlobUrl);
       prevBlobUrl = '';
     }
-    const rawUrl = `http://mbcap.localhost/frame.png?t=${p.meta!.t}`;
-    let srcUrl = rawUrl;
-    try {
-      const res = await fetch(rawUrl);
-      const blob = await res.blob();
-      prevBlobUrl = URL.createObjectURL(blob);
-      srcUrl = prevBlobUrl;
-    } catch {
-      /* 回退至 crossOrigin 协议直读 */
+    const isWin = navigator.userAgent.includes('Windows');
+    const candidateUrls = isWin
+      ? [`http://mbcap.localhost/frame.png?t=${p.meta!.t}`, `mbcap://localhost/frame.png?t=${p.meta!.t}`]
+      : [`mbcap://localhost/frame.png?t=${p.meta!.t}`, `http://mbcap.localhost/frame.png?t=${p.meta!.t}`];
+    let srcUrl = candidateUrls[0];
+    for (const u of candidateUrls) {
+      try {
+        const res = await fetch(u);
+        if (res.ok) {
+          const blob = await res.blob();
+          prevBlobUrl = URL.createObjectURL(blob);
+          srcUrl = prevBlobUrl;
+          break;
+        }
+      } catch {
+        /* 尝试下一个协议地址 */
+      }
     }
     const im = new Image();
     im.crossOrigin = 'anonymous';
@@ -830,7 +855,7 @@
     const rw = Math.round(sel.w * kx);
     const rh = Math.round(sel.h * ky);
 
-    const bw = barW || 560;
+    const bw = barW || 420;
     const bh = barH || (tool || beautify ? 76 : 36);
 
     // 默认与截图框左边缘对齐；若右侧空间不足则与截图框右边缘对齐
@@ -849,9 +874,47 @@
     }
     return { left, top };
   });
+
+  const curToolMeta = $derived(TOOLS.find((t) => t.id === activeTool) ?? TOOLS[0]);
+  const menuDropUp = $derived(bar ? bar.top + (barH || 40) + 170 > window.innerHeight : false);
 </script>
 
 <svelte:window onkeydown={onKey} />
+
+{#snippet toolSvg(id: Tool)}
+  <svg
+    class="tool-svg"
+    viewBox="0 0 16 16"
+    width="14"
+    height="14"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.65"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    {#if id === 'rect'}
+      <rect x="2.5" y="3.5" width="11" height="9" rx="1.6" />
+    {:else if id === 'pen'}
+      <path d="M11.3 2.5a1.5 1.5 0 0 1 2.2 2.2L6.2 12l-3.2.8.8-3.2 7.5-7.1z" />
+    {:else if id === 'text'}
+      <path d="M3.5 4.2V3h9v1.2M8 3v10M5.8 13h4.4" />
+    {:else if id === 'arrow'}
+      <path d="M3 13L13 3M7.2 3H13v5.8" />
+    {:else if id === 'ellipse'}
+      <ellipse cx="8" cy="8" rx="5.5" ry="4.5" />
+    {:else if id === 'number'}
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M7.2 6.3L8.2 5.5v5" />
+    {:else if id === 'mosaic'}
+      <rect x="2.5" y="2.5" width="11" height="11" rx="1.4" />
+      <path d="M2.5 8h11M8 2.5v11" />
+    {:else if id === 'blur'}
+      <circle cx="8" cy="8" r="5.2" stroke-dasharray="2.2 2.2" />
+      <circle cx="8" cy="8" r="2.2" />
+    {/if}
+  </svg>
+{/snippet}
 
 <div class="root">
   <canvas class="layer" bind:this={base}></canvas>
@@ -941,29 +1004,115 @@
       style="left:{bar.left}px; top:{bar.top}px"
     >
       <div class="row">
-        {#each TOOLS as t (t.id)}
+        <div class="tool-split" class:active={tool !== null}>
           <button
-            class="tb"
-            class:on={tool === t.id}
-            title={t.label}
+            class="tb tool-main"
+            class:on={tool !== null}
+            title={`${curToolMeta.label}（点击开启/关闭标注）`}
             onclick={() => {
               if (textEdit) commitText();
-              tool = tool === t.id ? null : t.id;
-            }}>{t.icon}</button
+              toolMenuOpen = false;
+              tool = tool === activeTool ? null : activeTool;
+            }}
           >
-        {/each}
-        <button class="tb label-tb" class:on={beautify} title="截屏美化（渐变背景+圆角阴影）" onclick={() => (beautify = !beautify)}>美化</button>
+            {@render toolSvg(activeTool)}
+            <span>{curToolMeta.label}</span>
+          </button>
+          <button
+            class="tb tool-caret"
+            class:on={tool !== null}
+            class:open={toolMenuOpen}
+            title="选择标注工具（画框 / 画笔 / 文字 / 箭头 / 马赛克…）"
+            aria-label="选择标注工具"
+            onclick={(e) => {
+              e.stopPropagation();
+              toolMenuOpen = !toolMenuOpen;
+            }}
+          >
+            <svg
+              viewBox="0 0 12 12"
+              width="10"
+              height="10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="2.5 4.5 6 8 9.5 4.5" />
+            </svg>
+          </button>
+
+          {#if toolMenuOpen}
+            <div
+              class="tool-menu"
+              class:drop-up={menuDropUp}
+              role="menu"
+              tabindex="-1"
+              onmousedown={(e) => e.stopPropagation()}
+            >
+              {#each TOOLS as t (t.id)}
+                <button
+                  class="tool-item"
+                  class:selected={tool === t.id}
+                  class:current={activeTool === t.id && tool === null}
+                  onclick={() => {
+                    if (textEdit) commitText();
+                    activeTool = t.id;
+                    tool = t.id;
+                    toolMenuOpen = false;
+                  }}
+                >
+                  {@render toolSvg(t.id)}
+                  <span>{t.label}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <button
+          class="tb label-tb"
+          class:on={beautify}
+          title="截屏美化（渐变背景+圆角阴影）"
+          onclick={() => {
+            toolMenuOpen = false;
+            beautify = !beautify;
+          }}>美化</button
+        >
+
+        {#if shapes.length > 0 || redoStack.length > 0 || tool !== null}
+          <button class="tb icon-tb" title="撤销 Ctrl+Z" aria-label="撤销" onclick={undo} disabled={!shapes.length}>
+            <svg viewBox="0 0 16 16" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6h6a3.5 3.5 0 0 1 0 7H7" />
+              <polyline points="6.5 3.5 3.5 6 6.5 8.5" />
+            </svg>
+          </button>
+          <button class="tb icon-tb" title="重做 Ctrl+Y" aria-label="重做" onclick={redo} disabled={!redoStack.length}>
+            <svg viewBox="0 0 16 16" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 6H6a3.5 3.5 0 0 0 0 7h3" />
+              <polyline points="9.5 3.5 12.5 6 9.5 8.5" />
+            </svg>
+          </button>
+        {/if}
+
         <span class="sep"></span>
-        <button class="tb" title="撤销 Ctrl+Z" onclick={undo} disabled={!shapes.length}>↶</button>
-        <button class="tb" title="重做 Ctrl+Y" onclick={redo}>↷</button>
-        <span class="sep"></span>
+
         {#if mode === 'chat'}
-          <button class="tb label-tb ok" title="将截图放入聊天输入框（补充问题后点发送，Enter / 双击）" onclick={() => act('attach_chat')}>📎 放入输入</button>
+          <button class="tb label-tb ok-text" title="将截图放入聊天输入框（补充问题后点发送，Enter / 双击）" onclick={() => act('attach_chat')}>放入输入</button>
+          <button class="tb label-tb" title="以图搜图（图片瀑布流 / 找原图 / 动漫角色 / 番剧出处）" onclick={() => act('image_search')}>搜图</button>
           <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
-          <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>📡 局域网发送</button>
-          <button class="tb" title="取消并返回聊天 Esc" onclick={close}>✕</button>
+          <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>发送</button>
+          <span class="sep"></span>
+          <button class="tb icon-tb cancel-btn" title="取消并返回聊天 Esc" aria-label="取消" onclick={close}>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+              <line x1="4" y1="4" x2="12" y2="12" />
+              <line x1="12" y1="4" x2="4" y2="12" />
+            </svg>
+          </button>
         {:else}
           <button class="tb label-tb" title="智能识别图片内容" onclick={() => act('auto')}>识图</button>
+          <button class="tb label-tb" title="以图搜图（图片瀑布流 / 找原图 / 动漫角色 / 番剧出处）" onclick={() => act('image_search')}>搜图</button>
           <button class="tb label-tb" title="提取文字 (OCR)" onclick={() => act('ocr')}>文字</button>
           <button class="tb label-tb" title="截图翻译" onclick={() => act('translate')}>翻译</button>
           <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
@@ -971,11 +1120,21 @@
             <button class="tb label-tb hot" title={`已识别 ${qrCount} 个二维码`} onclick={() => act('qr')}>二维码</button>
           {/if}
           <span class="sep"></span>
-          <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>📡 发送</button>
+          <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>发送</button>
           <button class="tb label-tb" title="钉到桌面 (屏幕贴图)" onclick={() => act('pin')}>贴图</button>
-          <button class="tb label-tb" title="保存图片" onclick={() => act('save')}>保存</button>
-          <button class="tb label-tb ok" title="复制图片 Enter" onclick={() => act('copy')}>复制</button>
-          <button class="tb" title="取消 Esc" onclick={close}>✕</button>
+          <button class="tb label-tb" title="选择文件夹保存图片" onclick={() => act('save')}>保存</button>
+          <span class="sep"></span>
+          <button class="tb icon-tb ok-check" title="复制图片 (Enter)" aria-label="复制图片" onclick={() => act('copy')}>
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 8.5 6.5 12 13 4.5" />
+            </svg>
+          </button>
+          <button class="tb icon-tb cancel-btn" title="取消 (Esc)" aria-label="取消" onclick={close}>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+              <line x1="4" y1="4" x2="12" y2="12" />
+              <line x1="12" y1="4" x2="4" y2="12" />
+            </svg>
+          </button>
         {/if}
       </div>
       {#if tool || beautify}
@@ -1100,7 +1259,7 @@
     background: var(--bg-solid);
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 8px;
+    border-radius: 10px;
     box-shadow: var(--shadow);
     padding: 4px 6px;
     z-index: 5;
@@ -1130,7 +1289,7 @@
     width: 28px;
     height: 28px;
     padding: 0;
-    font-size: 13.5px;
+    font-size: 13px;
     line-height: 1;
     border-radius: 6px;
     display: inline-flex;
@@ -1140,30 +1299,136 @@
   }
   .tb.label-tb {
     width: auto;
-    padding: 0 8px;
+    padding: 0 7px;
     font-size: 12.5px;
     font-weight: 500;
     letter-spacing: 0.01em;
   }
-  .tb:hover {
+  .tb.icon-tb {
+    width: 27px;
+    height: 28px;
+  }
+  .tb:hover:not(:disabled) {
     background: var(--hover);
   }
   .tb.on {
     background: var(--accent);
     color: var(--accent-fg);
   }
-  .tb.ok {
+  .tb.ok-text {
     color: var(--ok);
     font-weight: 550;
+  }
+  .tb.ok-check {
+    color: var(--ok);
+  }
+  .tb.ok-check:hover {
+    background: rgba(16, 185, 129, 0.14);
+  }
+  .tb.cancel-btn {
+    color: var(--fg-dim);
+  }
+  .tb.cancel-btn:hover {
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.12);
   }
   .tb.hot {
     color: var(--accent-blue);
   }
+
+  /* 默认画框 + 下拉选择分体组合按钮 */
+  .tool-split {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    height: 28px;
+  }
+  .tool-split.active {
+    border-color: transparent;
+    background: var(--accent);
+  }
+  .tb.tool-main {
+    width: auto;
+    height: 26px;
+    padding: 0 7px 0 8px;
+    gap: 5px;
+    font-size: 12.5px;
+    font-weight: 500;
+    border-radius: 5px 0 0 5px;
+  }
+  .tb.tool-caret {
+    width: 19px;
+    height: 26px;
+    padding: 0;
+    border-radius: 0 5px 5px 0;
+    border-left: 1px solid var(--border);
+    opacity: 0.8;
+  }
+  .tool-split.active .tb.tool-caret {
+    border-left-color: rgba(128, 128, 128, 0.28);
+  }
+  .tb.tool-caret:hover,
+  .tb.tool-caret.open {
+    opacity: 1;
+  }
+  .tb.tool-caret.open svg {
+    transform: rotate(180deg);
+  }
+  .tool-svg {
+    flex-shrink: 0;
+  }
+  .tool-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 3px;
+    width: 164px;
+    padding: 5px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    box-shadow: var(--shadow);
+    z-index: 20;
+  }
+  .tool-menu.drop-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+  }
+  .tool-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+  }
+  .tool-item:hover {
+    background: var(--hover);
+  }
+  .tool-item.current {
+    background: var(--panel);
+  }
+  .tool-item.selected {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+
   .sep {
     width: 1px;
     height: 14px;
     background: var(--border);
-    margin: 0 4px;
+    margin: 0 3px;
     flex-shrink: 0;
   }
   .color {

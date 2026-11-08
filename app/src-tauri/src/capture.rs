@@ -1,7 +1,7 @@
 //! 截图：抓取光标所在显示器 → 显示预创建的全屏遮罩窗口
 use crate::payload::{Origin, Payload, PayloadKind};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Frame {
@@ -54,8 +54,17 @@ pub fn start(app: &AppHandle, mode: &str) {
             crate::log_msg(&app, "[capture] get_or_build capture 失败");
             return;
         };
-        let _ = w.set_position(PhysicalPosition::new(frame.x, frame.y));
-        let _ = w.set_size(PhysicalSize::new(frame.width, frame.height));
+        #[cfg(target_os = "macos")]
+        {
+            let s = frame.scale.max(1.0) as f64;
+            let _ = w.set_position(tauri::LogicalPosition::new(frame.x as f64, frame.y as f64));
+            let _ = w.set_size(tauri::LogicalSize::new(frame.width as f64 / s, frame.height as f64 / s));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = w.set_position(tauri::PhysicalPosition::new(frame.x, frame.y));
+            let _ = w.set_size(tauri::PhysicalSize::new(frame.width, frame.height));
+        }
         crate::wins::deliver(&app, "capture", p);
         crate::log_msg(&app, format!("[capture] 已投递截图帧 {}x{} mode={mode}", frame.width, frame.height));
 
@@ -85,6 +94,11 @@ pub fn start(app: &AppHandle, mode: &str) {
 fn window_rects(f: &Frame) -> Vec<[i32; 4]> {
     let Ok(list) = xcap::Window::all() else { return vec![] };
     let mut out = vec![];
+    #[cfg(target_os = "macos")]
+    let scale = f.scale.max(1.0);
+    #[cfg(not(target_os = "macos"))]
+    let scale = 1.0f32;
+
     for w in list {
         if w.is_minimized().unwrap_or(true) {
             continue;
@@ -97,10 +111,14 @@ fn window_rects(f: &Frame) -> Vec<[i32; 4]> {
         if ww < 40 || hh < 40 {
             continue;
         }
-        let x0 = (x - f.x).max(0);
-        let y0 = (y - f.y).max(0);
-        let x1 = (x - f.x + ww as i32).min(f.width as i32);
-        let y1 = (y - f.y + hh as i32).min(f.height as i32);
+        let rx0 = (((x - f.x) as f32) * scale).round() as i32;
+        let ry0 = (((y - f.y) as f32) * scale).round() as i32;
+        let rw = ((ww as f32) * scale).round() as i32;
+        let rh = ((hh as f32) * scale).round() as i32;
+        let x0 = rx0.max(0);
+        let y0 = ry0.max(0);
+        let x1 = (rx0 + rw).min(f.width as i32);
+        let y1 = (ry0 + rh).min(f.height as i32);
         if x1 - x0 < 40 || y1 - y0 < 40 {
             continue;
         }

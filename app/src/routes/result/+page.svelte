@@ -10,14 +10,16 @@
   import QrView from '$lib/views/QrView.svelte';
   import PaletteView from '$lib/views/PaletteView.svelte';
   import ColorView from '$lib/views/ColorView.svelte';
+  import ImageSearchView from '$lib/views/ImageSearchView.svelte';
 
-  /** 视图注册表：新增视图（如视频抽帧）在这里登记 */
+  /** 视图注册表：新增视图（如视频抽帧、以图搜图）在这里登记 */
   const VIEWS: Record<string, Component<any>> = {
     chat: ChatView,
     ocr: OcrView,
     qr: QrView,
     palette: PaletteView,
     color: ColorView,
+    image_search: ImageSearchView,
   };
 
   let payload = $state<Payload | null>(null);
@@ -48,18 +50,21 @@
     const unS = onLlmStatus((s) => (status = s));
     ipc.llmStatus().then((s) => (status = s));
     const unO = onOutsideClick(() => {
+      if ((window as any).__mb_dialog_open) return;
       if (!pinned && Date.now() - openedAt > 450) {
         close();
       }
     });
     // 失去焦点自动隐藏（未固定且打开超过 500ms）
     const unF = win.onFocusChanged(({ payload: focused }) => {
+      if ((window as any).__mb_dialog_open) return;
       if (focused) {
         openedAt = Date.now();
         return;
       }
       if (!pinned && Date.now() - openedAt > 500) {
         setTimeout(async () => {
+          if ((window as any).__mb_dialog_open) return;
           try {
             const stillFocused = await win.isFocused();
             if (!stillFocused && !pinned) close();

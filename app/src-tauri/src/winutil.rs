@@ -332,7 +332,224 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use core::ffi::{c_char, c_void};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const c_void) -> *mut c_void;
+        fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+        fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+
+    unsafe fn msg_send_id(receiver: *mut c_void, sel: *mut c_void) -> *mut c_void {
+        if receiver.is_null() || sel.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe {
+            let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            f(receiver, sel)
+        }
+    }
+
+    unsafe fn msg_send_isize(receiver: *mut c_void, sel: *mut c_void) -> isize {
+        if receiver.is_null() || sel.is_null() {
+            return 0;
+        }
+        unsafe {
+            let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+                std::mem::transmute(objc_msgSend as *const ());
+            f(receiver, sel)
+        }
+    }
+
+    unsafe fn msg_send_i32(receiver: *mut c_void, sel: *mut c_void) -> i32 {
+        if receiver.is_null() || sel.is_null() {
+            return 0;
+        }
+        unsafe {
+            let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+                std::mem::transmute(objc_msgSend as *const ());
+            f(receiver, sel)
+        }
+    }
+
+    unsafe fn frontmost_app() -> *mut c_void {
+        unsafe {
+            let cls = objc_getClass(c"NSWorkspace".as_ptr());
+            let ws = msg_send_id(cls, sel_registerName(c"sharedWorkspace".as_ptr()));
+            msg_send_id(ws, sel_registerName(c"frontmostApplication".as_ptr()))
+        }
+    }
+
+    pub fn process_name(pid: u32) -> Option<String> {
+        let out = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if full.is_empty() {
+            return None;
+        }
+        full.rsplit('/').next().map(|s| s.to_string())
+    }
+
+    /// 在 macOS 上返回当前最前端应用 PID（作为跨线程标识句柄，供后续 focus_hwnd 切回焦点）
+    pub fn foreground_hwnd() -> isize {
+        unsafe {
+            let app = frontmost_app();
+            if app.is_null() {
+                return 0;
+            }
+            msg_send_i32(app, sel_registerName(c"processIdentifier".as_ptr())) as isize
+        }
+    }
+
+    /// 获取当前 macOS 前台应用名称（如 "Safari"、"Google Chrome"、"miniBot"）
+    pub fn foreground_process() -> Option<String> {
+        unsafe {
+            let app = frontmost_app();
+            if app.is_null() {
+                return None;
+            }
+            let ns_str = msg_send_id(app, sel_registerName(c"localizedName".as_ptr()));
+            if !ns_str.is_null() {
+                let c_ptr = msg_send_id(ns_str, sel_registerName(c"UTF8String".as_ptr())) as *const c_char;
+                if !c_ptr.is_null() {
+                    let s = std::ffi::CStr::from_ptr(c_ptr).to_string_lossy().trim().to_string();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+            let pid = msg_send_i32(app, sel_registerName(c"processIdentifier".as_ptr()));
+            if pid > 0 {
+                return process_name(pid as u32);
+            }
+            None
+        }
+    }
+
+    /// 激活指定 PID 对应的 macOS 应用窗口（用于「替换原文」切回来源应用粘贴）
+    pub fn focus_hwnd(hwnd: isize) {
+        if hwnd <= 0 {
+            return;
+        }
+        unsafe {
+            let cls = objc_getClass(c"NSRunningApplication".as_ptr());
+            let sel_find = sel_registerName(c"runningApplicationWithProcessIdentifier:".as_ptr());
+            if cls.is_null() || sel_find.is_null() {
+                return;
+            }
+            let find_fn: unsafe extern "C" fn(*mut c_void, *mut c_void, i32) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            let app = find_fn(cls, sel_find, hwnd as i32);
+            if app.is_null() {
+                return;
+            }
+            let sel_act = sel_registerName(c"activateWithOptions:".as_ptr());
+            let act_fn: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> bool =
+                std::mem::transmute(objc_msgSend as *const ());
+            // NSApplicationActivateIgnoringOtherApps = 1 << 1 (2)
+            let _ = act_fn(app, sel_act, 2);
+        }
+    }
+
+    /// 获取当前鼠标全局屏幕坐标（以主屏幕左上角为 (0,0) 的逻辑点坐标）
+    pub fn cursor_pos() -> (i32, i32) {
+        unsafe {
+            let ev = CGEventCreate(std::ptr::null());
+            if ev.is_null() {
+                return (320, 240);
+            }
+            let pt = CGEventGetLocation(ev);
+            CFRelease(ev);
+            (pt.x.round() as i32, pt.y.round() as i32)
+        }
+    }
+
+    pub fn is_cursor_ibeam() -> bool {
+        false
+    }
+
+    /// 鼠标左键当前是否按下（CoreGraphics CombinedSessionState = 0, LeftButton = 0）
+    pub fn is_mouse_left_down() -> bool {
+        unsafe { CGEventSourceButtonState(0, 0) }
+    }
+
+    /// 是否有任何修饰键（Shift / Ctrl / Option / Command）正被按住
+    pub fn any_modifier_down() -> bool {
+        const MOD_MASK: u64 = 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
+        unsafe { (CGEventSourceFlagsState(0) & MOD_MASK) != 0 }
+    }
+
+    pub fn point_in_hwnd(_hwnd: isize, _x: i32, _y: i32) -> bool {
+        true
+    }
+
+    /// 读取 macOS 系统剪贴板变更序号（NSPasteboard.generalPasteboard.changeCount）
+    pub fn clipboard_seq() -> u32 {
+        unsafe {
+            let cls = objc_getClass(c"NSPasteboard".as_ptr());
+            let pb = msg_send_id(cls, sel_registerName(c"generalPasteboard".as_ptr()));
+            msg_send_isize(pb, sel_registerName(c"changeCount".as_ptr())) as u32
+        }
+    }
+
+    pub fn send_ctrl(letter: char) {
+        let ch = letter.to_ascii_lowercase();
+        let script = format!(
+            "tell application \"System Events\" to keystroke \"{ch}\" using command down"
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
+    }
+
+    pub fn send_ctrl_c_clean() {
+        send_ctrl('c');
+    }
+
+    pub fn make_noactivate(_hwnd: isize) {}
+
+    pub fn show_noactivate(_hwnd: isize) {}
+
+    pub fn hide_hwnd(_hwnd: isize) {}
+
+    pub fn minimize_hwnd(_hwnd: isize) {}
+
+    pub fn refresh_shell_icon_cache() {}
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod imp {
     pub fn process_name(_pid: u32) -> Option<String> {
         None
@@ -372,19 +589,9 @@ mod imp {
         0
     }
 
-    pub fn send_ctrl(letter: char) {
-        let ch = letter.to_ascii_lowercase();
-        let script = format!(
-            "tell application \"System Events\" to keystroke \"{ch}\" using command down"
-        );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .output();
-    }
+    pub fn send_ctrl(_letter: char) {}
 
-    pub fn send_ctrl_c_clean() {
-        send_ctrl('c');
-    }
+    pub fn send_ctrl_c_clean() {}
 
     pub fn make_noactivate(_hwnd: isize) {}
 

@@ -514,10 +514,37 @@ pub async fn install_update(app: &AppHandle, installer_path: String) -> Result<(
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(&path)
+        let dmg_str = path.to_string_lossy().replace('\'', "'\\''");
+        let upgrade_script = format!(
+            r#"sleep 0.5
+DMG='{dmg_str}'
+MNT=$(mktemp -d /tmp/minibot_dmg.XXXXXX)
+if hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet; then
+    APP_SRC=$(find "$MNT" -maxdepth 2 -name "*.app" | head -n 1)
+    if [ -n "$APP_SRC" ] && [ -w "/Applications" ]; then
+        rm -rf "/Applications/miniBot.app"
+        cp -R "$APP_SRC" "/Applications/miniBot.app"
+        xattr -cr "/Applications/miniBot.app" 2>/dev/null || true
+        hdiutil detach "$MNT" -quiet 2>/dev/null || true
+        rmdir "$MNT" 2>/dev/null || true
+        open -n "/Applications/miniBot.app"
+        exit 0
+    fi
+    hdiutil detach "$MNT" -quiet 2>/dev/null || true
+fi
+rmdir "$MNT" 2>/dev/null || true
+open "$DMG"
+"#
+        );
+        std::process::Command::new("sh")
+            .args(["-c", &upgrade_script])
             .spawn()
-            .map_err(|e| format!("挂载 macOS DMG 安装镜像失败：{e}"))?;
+            .map_err(|e| format!("启动 macOS 更新安装脚本失败：{e}"))?;
+
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(350));
+            std::process::exit(0);
+        });
     }
 
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]

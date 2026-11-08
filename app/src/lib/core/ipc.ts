@@ -14,6 +14,7 @@ import type {
   EngineOverview,
   GpuSnapshot,
   HistoryEntry,
+  ImageSearchResponse,
   LocalSendItem,
   LocalSendPeer,
   LocalSendProgress,
@@ -87,11 +88,24 @@ export const ipc = {
   webSearch: (query: string, maxResults = 5) => invoke<SearchResponse>('web_search', { query, maxResults }),
   copyText: (text: string) => invoke<void>('copy_text', { text }),
   copyImage: (data: string) => invoke<void>('copy_image', { data }),
-  saveImage: (data: string) => invoke<string>('save_image', { data }),
+  saveImage: async (data: string) => {
+    if (typeof window !== 'undefined') (window as any).__mb_dialog_open = true;
+    try {
+      return await invoke<string>('save_image', { data });
+    } finally {
+      if (typeof window !== 'undefined') {
+        setTimeout(() => {
+          (window as any).__mb_dialog_open = false;
+        }, 300);
+      }
+    }
+  },
   ocrImage: (data: string) => invoke<OcrResult>('ocr_image', { data }),
   qrDecode: (data: string) => invoke<QrResult[]>('qr_decode', { data }),
   qrEncode: (text: string, ec: string, dark: string, light: string) => invoke<string>('qr_encode', { text, ec, dark, light }),
   pinImage: (data: string, x: number, y: number, w: number, h: number) => invoke<void>('pin_image', { data, x, y, w, h }),
+  imageSearch: (data: string, engine = 'baidu') => invoke<ImageSearchResponse>('image_search', { data, engine }),
+  fetchRemoteImage: (url: string) => invoke<string>('fetch_remote_image', { url }),
 
   historyAdd: (entry: HistoryEntry, image?: string | null) => invoke<number>('history_add', { entry, image: image ?? null }),
   historyList: (query: string, limit = 200) => invoke<HistoryEntry[]>('history_list', { query, limit }),

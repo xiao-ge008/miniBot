@@ -248,6 +248,31 @@ export interface SearchResponse {
   hits: SearchHit[];
 }
 
+export interface ImageSearchExternalUrl {
+  id: string;
+  name: string;
+  url: string;
+}
+
+export interface ImageSearchItem {
+  title: string;
+  subtitle: string;
+  image_url: string;
+  source_url: string;
+  badge: string;
+  width: number;
+  height: number;
+}
+
+export interface ImageSearchResponse {
+  engine: 'baidu' | 'tracemoe' | 'animetrace' | string;
+  guess: string;
+  page_url: string;
+  public_image_url: string;
+  external_urls: ImageSearchExternalUrl[];
+  items: ImageSearchItem[];
+}
+
 export interface LocalSendSelfInfo {
   alias: string;
   lan_ips: string[];

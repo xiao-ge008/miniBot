@@ -1,0 +1,638 @@
+//! 前端可调用的命令
+use crate::llm::{ChatEvent, LlmError, Status, StatusInfo};
+use crate::payload::Payload;
+use crate::settings::Settings;
+use crate::AppState;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager, State, Window};
+
+type R<T> = Result<T, String>;
+
+fn e<E: std::fmt::Display>(err: E) -> String {
+    err.to_string()
+}
+
+// ---------- Payload / 窗口 ----------
+
+#[tauri::command]
+pub fn take_payload(window: Window, st: State<AppState>) -> Option<Payload> {
+    st.pending.lock().unwrap().remove(window.label())
+}
+
+#[tauri::command]
+pub fn hide_self(app: AppHandle, window: tauri::WebviewWindow) {
+    let label = window.label().to_string();
+    let _ = window.hide();
+    crate::winutil::hide_hwnd(crate::wins::hwnd_of(&window));
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window(&label) {
+            let _ = w.hide();
+            crate::winutil::hide_hwnd(crate::wins::hwnd_of(&w));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn minimize_self(app: AppHandle, window: tauri::WebviewWindow) {
+    let label = window.label().to_string();
+    let _ = window.minimize();
+    crate::winutil::minimize_hwnd(crate::wins::hwnd_of(&window));
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window(&label) {
+            let _ = w.minimize();
+            crate::winutil::minimize_hwnd(crate::wins::hwnd_of(&w));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn open_result(app: AppHandle, payload: Payload) {
+    crate::wins::open_result(&app, payload);
+}
+
+#[tauri::command]
+pub fn open_page(app: AppHandle, route: String, title: String) {
+    crate::wins::open_page(&app, &route, &title);
+}
+
+#[tauri::command]
+pub fn close_page(app: AppHandle, window: Window) {
+    crate::wins::close_page(&app, window.label());
+}
+
+#[tauri::command]
+pub fn open_qr(app: AppHandle, text: String) {
+    crate::wins::open_qr(&app, text);
+}
+
+#[tauri::command]
+pub fn open_localsend(app: AppHandle, payload: Option<Payload>) {
+    let p = payload.unwrap_or_else(|| {
+        Payload::text(String::new(), crate::payload::Origin::Launcher, None, 0)
+    });
+    crate::wins::open_localsend(&app, p);
+}
+
+#[tauri::command]
+pub fn trigger(app: AppHandle, name: String) {
+    crate::actions::trigger(&app, &name);
+}
+
+#[tauri::command]
+pub fn replace_text(app: AppHandle, hwnd: isize, text: String) {
+    crate::actions::replace_text(&app, hwnd, text);
+}
+
+// ---------- 设置 ----------
+
+#[tauri::command]
+pub fn get_settings(st: State<AppState>) -> Settings {
+    st.settings.get()
+}
+
+#[tauri::command]
+pub fn save_settings(app: AppHandle, st: State<AppState>, mut settings: Settings) -> R<Vec<String>> {
+    use tauri::Emitter;
+    settings.hotkeys.launcher = crate::hotkeys::normalize_shortcut(&settings.hotkeys.launcher);
+    settings.hotkeys.capture = crate::hotkeys::normalize_shortcut(&settings.hotkeys.capture);
+    settings.hotkeys.selection = crate::hotkeys::normalize_shortcut(&settings.hotkeys.selection);
+    settings.hotkeys.color = crate::hotkeys::normalize_shortcut(&settings.hotkeys.color);
+    let old = st.settings.get();
+    st.settings.set(settings.clone()).map_err(e)?;
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let al = app.autolaunch();
+        let _ = if settings.autostart { al.enable() } else { al.disable() };
+    }
+    if old.api.port != settings.api.port || old.api.lan != settings.api.lan || old.api.enabled != settings.api.enabled {
+        st.gateway_error.lock().unwrap().replace("网关配置已修改，重启 miniBot 后生效".into());
+    }
+    if let Some(w) = app.get_webview_window("result") {
+        let rw = settings.ui.result_width.clamp(360.0, 1400.0);
+        let rh = settings.ui.result_height.clamp(240.0, 1200.0);
+        let _ = w.set_size(tauri::LogicalSize::new(rw, rh));
+    }
+    // 开启云端 API 模型时，若本地推理引擎正在运行则自动释放显存
+    if settings.llm.api_enabled && !old.llm.api_enabled {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let st2 = app2.state::<AppState>();
+            st2.llm.release(&app2, Status::Released, "已切换至云端 API 模型").await;
+        });
+    } else {
+        st.llm.emit_status(&app, "");
+    }
+    let _ = app.emit("minibot://settings", &settings);
+    Ok(crate::hotkeys::register(&app))
+}
+
+#[tauri::command]
+pub fn hotkeys_suspend(app: AppHandle, suspend: bool) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if suspend {
+        let _ = app.global_shortcut().unregister_all();
+    } else {
+        let _ = crate::hotkeys::register(&app);
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct AppInfo {
+    pub version: String,
+    pub api_url: String,
+    pub gateway_error: Option<String>,
+    pub hotkey_errors: Vec<String>,
+    pub config_dir: String,
+    pub agents_dir: String,
+}
+
+#[tauri::command]
+pub fn app_info(app: AppHandle, st: State<AppState>) -> AppInfo {
+    let s = st.settings.get();
+    AppInfo {
+        version: app.package_info().version.to_string(),
+        api_url: format!("http://127.0.0.1:{}/v1", s.api.port),
+        gateway_error: st.gateway_error.lock().unwrap().clone(),
+        hotkey_errors: st.hotkey_errors.lock().unwrap().clone(),
+        config_dir: app.path().app_config_dir().unwrap_or_default().to_string_lossy().into(),
+        agents_dir: agents_dir(&app).to_string_lossy().into(),
+    }
+}
+
+// ---------- 模型 ----------
+
+#[tauri::command]
+pub async fn llm_chat(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    id: String,
+    messages: serde_json::Value,
+    params: Option<serde_json::Value>,
+    force: Option<bool>,
+    on_event: Channel<ChatEvent>,
+) -> Result<String, LlmError> {
+    let llm = st.llm.clone();
+    llm.chat(&app, id, messages, params.unwrap_or_default(), force.unwrap_or(false), on_event).await
+}
+
+#[tauri::command]
+pub fn llm_cancel(st: State<AppState>, id: String) {
+    st.llm.cancel(&id);
+}
+
+#[tauri::command]
+pub fn llm_status(st: State<AppState>) -> StatusInfo {
+    st.llm.status_info(&st.settings.get().llm)
+}
+
+#[tauri::command]
+pub async fn llm_test_api(base_url: String, api_key: String, model: String) -> R<crate::llm::CloudTestResult> {
+    crate::llm::test_cloud_api(&base_url, &api_key, &model).await
+}
+
+#[tauri::command]
+pub async fn llm_fetch_models(base_url: String, api_key: String) -> R<Vec<String>> {
+    crate::llm::fetch_cloud_models(&base_url, &api_key).await
+}
+
+#[tauri::command]
+pub async fn llm_release(app: AppHandle, st: State<'_, AppState>) -> R<()> {
+    st.llm.release(&app, Status::Released, "手动释放").await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn llm_start(app: AppHandle, st: State<'_, AppState>) -> R<()> {
+    st.llm
+        .ensure_ready(&app, true)
+        .await
+        .map_err(|err| match err {
+            LlmError::Other { message } => message,
+            LlmError::PortBusy { port } => format!("端口 {port} 被占用"),
+            LlmError::GpuBusy { .. } => "显卡繁忙".into(),
+            LlmError::Cancelled => "已取消".into(),
+        })
+}
+
+#[tauri::command]
+pub async fn engine_overview(app: AppHandle) -> R<crate::engine::EngineOverview> {
+    Ok(crate::engine::get_overview(&app).await)
+}
+
+#[tauri::command]
+pub async fn engine_activate_model(app: AppHandle, model_id: String) -> R<crate::engine::EngineOverview> {
+    crate::engine::activate_model(&app, &model_id).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn engine_pick_models_dir(
+    app: AppHandle,
+    st: State<'_, AppState>,
+) -> R<Option<(crate::engine::EngineOverview, usize)>> {
+    let s = st.settings.get();
+    let cur_dir = if s.llm.models_dir.trim().is_empty() {
+        crate::settings::default_engine_dir()
+            .join("models")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        s.llm.models_dir
+    };
+    let picked = tokio::task::spawn_blocking(move || crate::engine::pick_folder_dialog(&cur_dir))
+        .await
+        .map_err(e)?;
+    let Some(new_dir) = picked else {
+        return Ok(None);
+    };
+    let res = crate::engine::change_models_dir(&app, new_dir).await.map_err(e)?;
+    Ok(Some(res))
+}
+
+#[tauri::command]
+pub async fn engine_download_model(
+    app: AppHandle,
+    model_id: String,
+    mirror: String,
+    on_progress: Channel<crate::engine::DownloadProgress>,
+) -> R<crate::engine::EngineOverview> {
+    crate::engine::download_model(&app, model_id, mirror, on_progress).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn engine_download_runtime(
+    app: AppHandle,
+    backend: String,
+    on_progress: Channel<crate::engine::DownloadProgress>,
+) -> R<crate::engine::EngineOverview> {
+    crate::engine::download_engine(&app, backend, on_progress).await.map_err(e)
+}
+
+#[tauri::command]
+pub fn engine_cancel_download() {
+    crate::engine::cancel_download();
+}
+
+#[tauri::command]
+pub fn gpu_snapshot() -> crate::gpu::GpuSnapshot {
+    crate::gpu::snapshot()
+}
+
+// ---------- 截图 / 图片 ----------
+
+#[tauri::command]
+pub fn capture_ready(app: AppHandle) {
+    crate::capture::ready(&app);
+}
+
+#[tauri::command]
+pub fn capture_close(app: AppHandle) {
+    crate::capture::close(&app);
+}
+
+#[tauri::command]
+pub fn send_to_chat(app: AppHandle, image: String, auto_send: bool) {
+    use tauri::Emitter;
+    crate::capture::close(&app);
+    crate::wins::open_launcher(&app);
+    let _ = app.emit(
+        "minibot://chat-capture",
+        serde_json::json!({ "image": image, "auto_send": auto_send }),
+    );
+}
+
+#[tauri::command]
+pub async fn web_search(query: String, max_results: Option<usize>) -> crate::websearch::SearchResponse {
+    crate::websearch::search(&query, max_results.unwrap_or(5)).await
+}
+
+fn rgba_from(data: &str) -> R<image::RgbaImage> {
+    let bytes = crate::imgutil::decode_b64(data).map_err(e)?;
+    crate::imgutil::decode_rgba(&bytes).map_err(e)
+}
+
+#[tauri::command]
+pub fn copy_text(st: State<AppState>, text: String) -> R<()> {
+    st.clip.suppress(800);
+    if !crate::clip::set_text_retry(text) {
+        return Err("写入剪贴板失败".into());
+    }
+    st.clip.mark_self_write();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn copy_image(st: State<'_, AppState>, data: String) -> R<()> {
+    let img = rgba_from(&data)?;
+    let w = img.width() as usize;
+    let h = img.height() as usize;
+    let raw = img.into_raw();
+    st.clip.suppress(800);
+    let mut cb = arboard::Clipboard::new().map_err(e)?;
+    let mut last_err = None;
+    for i in 0..6 {
+        match cb.set_image(arboard::ImageData {
+            width: w,
+            height: h,
+            bytes: std::borrow::Cow::Borrowed(&raw),
+        }) {
+            Ok(()) => {
+                st.clip.mark_self_write();
+                return Ok(());
+            }
+            Err(err) => {
+                last_err = Some(err);
+                if i < 5 {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+    }
+    Err(e(last_err.unwrap()))
+}
+
+#[tauri::command]
+pub async fn save_image(st: State<'_, AppState>, data: String) -> R<String> {
+    let dir = std::path::PathBuf::from(st.settings.get().save_dir);
+    std::fs::create_dir_all(&dir).map_err(e)?;
+    let name = format!("miniBot_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let path = dir.join(name);
+    let bytes = crate::imgutil::decode_b64(&data).map_err(e)?;
+    std::fs::write(&path, bytes).map_err(e)?;
+    Ok(path.to_string_lossy().into())
+}
+
+#[tauri::command]
+pub async fn ocr_image(data: String) -> R<crate::ocr::OcrResult> {
+    let img = rgba_from(&data)?;
+    tokio::task::spawn_blocking(move || crate::ocr::recognize(&img)).await.map_err(e)?.map_err(e)
+}
+
+#[tauri::command]
+pub async fn qr_decode(data: String) -> R<Vec<crate::qr::QrResult>> {
+    let img = rgba_from(&data)?;
+    tokio::task::spawn_blocking(move || crate::qr::decode_rgba(&img)).await.map_err(e)
+}
+
+#[tauri::command]
+pub fn qr_encode(text: String, ec: String, dark: String, light: String) -> R<String> {
+    crate::qr::encode_svg(&text, &ec, &dark, &light).map_err(e)
+}
+
+#[tauri::command]
+pub fn pin_image(app: AppHandle, data: String, x: i32, y: i32, w: f64, h: f64) {
+    crate::wins::open_pin(&app, data, x, y, w, h);
+}
+
+// ---------- 历史 ----------
+
+#[tauri::command]
+pub fn history_add(st: State<AppState>, entry: crate::history::Entry, image: Option<String>) -> R<i64> {
+    let keep = st.settings.get().history_keep_images;
+    st.history.as_ref().ok_or("历史库不可用")?.add(entry, image, keep).map_err(e)
+}
+
+#[tauri::command]
+pub fn history_list(st: State<AppState>, query: String, limit: u32) -> R<Vec<crate::history::Entry>> {
+    st.history.as_ref().ok_or("历史库不可用")?.list(&query, limit).map_err(e)
+}
+
+#[tauri::command]
+pub fn history_delete(st: State<AppState>, id: i64) -> R<()> {
+    st.history.as_ref().ok_or("历史库不可用")?.delete(id).map_err(e)
+}
+
+#[tauri::command]
+pub fn history_clear(st: State<AppState>) -> R<()> {
+    st.history.as_ref().ok_or("历史库不可用")?.clear().map_err(e)
+}
+
+#[tauri::command]
+pub fn read_image_file(path: String) -> R<String> {
+    let bytes = std::fs::read(&path).map_err(e)?;
+    let img = crate::imgutil::decode_rgba(&bytes).map_err(e)?;
+    Ok(crate::imgutil::to_data_uri(&crate::imgutil::encode_png(&img)))
+}
+
+// ---------- 永久多轮 AI 聊天会话 ----------
+
+#[tauri::command]
+pub fn chat_session_list(st: State<AppState>) -> R<Vec<crate::history::ChatSession>> {
+    st.history.as_ref().ok_or("历史库不可用")?.chat_session_list().map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_session_create(st: State<AppState>, title: String) -> R<crate::history::ChatSession> {
+    st.history.as_ref().ok_or("历史库不可用")?.chat_session_create(title).map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_session_rename(st: State<AppState>, id: String, title: String) -> R<()> {
+    st.history.as_ref().ok_or("历史库不可用")?.chat_session_rename(&id, &title).map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_session_delete(st: State<AppState>, id: String) -> R<()> {
+    st.history.as_ref().ok_or("历史库不可用")?.chat_session_delete(&id).map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_message_list(st: State<AppState>, session_id: String) -> R<Vec<crate::history::ChatMessageRecord>> {
+    st.history.as_ref().ok_or("历史库不可用")?.chat_message_list(&session_id).map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_message_add(
+    st: State<AppState>,
+    session_id: String,
+    role: String,
+    content: String,
+    attachments: Vec<crate::history::ChatAttachment>,
+) -> R<i64> {
+    st.history
+        .as_ref()
+        .ok_or("历史库不可用")?
+        .chat_message_add(&session_id, &role, &content, &attachments)
+        .map_err(e)
+}
+
+// ---------- 智能体 ----------
+
+pub fn agents_dir(app: &AppHandle) -> std::path::PathBuf {
+    app.path().app_config_dir().unwrap_or_default().join("agents")
+}
+
+/// 读取用户自定义智能体（agents/*.json）
+#[tauri::command]
+pub fn list_user_agents(app: AppHandle) -> Vec<serde_json::Value> {
+    let dir = agents_dir(&app);
+    let _ = std::fs::create_dir_all(&dir);
+    let mut out = vec![];
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for f in rd.flatten() {
+            if f.path().extension().map(|x| x == "json").unwrap_or(false) {
+                if let Ok(v) = std::fs::read_to_string(f.path()).map(|s| serde_json::from_str::<serde_json::Value>(&s)) {
+                    if let Ok(v) = v {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub fn save_user_agent(app: AppHandle, agent: serde_json::Value) -> R<()> {
+    let id = agent.get("id").and_then(|v| v.as_str()).ok_or("缺少 id")?;
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("id 只能包含字母、数字、- 和 _".into());
+    }
+    let dir = agents_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(e)?;
+    std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string_pretty(&agent).map_err(e)?).map_err(e)
+}
+
+#[tauri::command]
+pub fn open_agents_dir(app: AppHandle) -> R<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = agents_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(e)?;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(e)
+}
+
+#[tauri::command]
+pub fn delete_user_agent(app: AppHandle, id: String) -> R<()> {
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("非法 id".into());
+    }
+    std::fs::remove_file(agents_dir(&app).join(format!("{id}.json"))).map_err(e)
+}
+
+// ---------- Edge TTS 语音朗读 ----------
+
+#[tauri::command]
+pub fn tts_voices() -> Vec<crate::tts::VoiceOption> {
+    crate::tts::builtin_voices()
+}
+
+#[tauri::command]
+pub async fn tts_speak(
+    st: State<'_, AppState>,
+    text: String,
+    voice: Option<String>,
+    rate: Option<String>,
+) -> R<String> {
+    let cfg = st.settings.get().tts;
+    let resolved_voice = match voice.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(v) => v.to_string(),
+        None => crate::tts::resolve_voice(&text, &cfg.voice, cfg.auto_lang),
+    };
+    let resolved_rate = rate
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&cfg.rate)
+        .to_string();
+    crate::tts::synthesize(&text, &resolved_voice, &resolved_rate, &cfg.volume)
+        .await
+        .map_err(e)
+}
+
+#[tauri::command]
+pub fn tts_broadcast(app: AppHandle, payload: serde_json::Value) {
+    use tauri::Emitter;
+    let _ = app.emit("minibot://tts", payload);
+}
+
+// ---------- LocalSend 局域网文件/文本/截图快传 ----------
+
+#[derive(serde::Serialize)]
+pub struct LocalSendSelfInfo {
+    pub alias: String,
+    pub lan_ips: Vec<String>,
+    pub context_menu_enabled: bool,
+    pub os_model: String,
+}
+
+#[tauri::command]
+pub fn localsend_info() -> LocalSendSelfInfo {
+    LocalSendSelfInfo {
+        alias: crate::localsend::self_alias(),
+        lan_ips: crate::localsend::local_lan_ips()
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect(),
+        context_menu_enabled: crate::localsend::is_context_menu_registered(),
+        os_model: crate::localsend::os_model_name().to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn localsend_scan(extra_ips: Option<Vec<String>>) -> Vec<crate::localsend::LocalSendPeer> {
+    crate::localsend::scan_peers(extra_ips.unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn localsend_probe(ip: String, port: Option<u16>) -> R<crate::localsend::LocalSendPeer> {
+    let clean = ip.trim();
+    let (host, p) = match clean.split_once(':') {
+        Some((h, pt)) => (
+            h.trim().to_string(),
+            pt.trim().parse::<u16>().unwrap_or(crate::localsend::LOCALSEND_PORT),
+        ),
+        None => (
+            clean.to_string(),
+            port.unwrap_or(crate::localsend::LOCALSEND_PORT),
+        ),
+    };
+    crate::localsend::probe_peer(&host, p).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn localsend_pick_files() -> R<Vec<crate::localsend::LocalSendItem>> {
+    let paths = tokio::task::spawn_blocking(crate::localsend::pick_files_dialog)
+        .await
+        .map_err(e)?;
+    Ok(crate::localsend::resolve_paths_to_items(paths))
+}
+
+#[tauri::command]
+pub async fn localsend_pick_folder() -> R<Vec<crate::localsend::LocalSendItem>> {
+    let picked = tokio::task::spawn_blocking(crate::localsend::pick_folder_for_localsend)
+        .await
+        .map_err(e)?;
+    match picked {
+        Some(dir) => Ok(crate::localsend::resolve_paths_to_items(vec![dir])),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+pub fn localsend_resolve_paths(paths: Vec<String>) -> Vec<crate::localsend::LocalSendItem> {
+    crate::localsend::resolve_paths_to_items(paths)
+}
+
+#[tauri::command]
+pub async fn localsend_send(
+    peer: crate::localsend::LocalSendPeer,
+    items: Vec<crate::localsend::LocalSendItem>,
+    pin: Option<String>,
+    on_progress: Channel<crate::localsend::LocalSendProgress>,
+) -> R<()> {
+    crate::localsend::send_items(peer, items, pin, on_progress)
+        .await
+        .map_err(e)
+}
+
+#[tauri::command]
+pub fn localsend_cancel() {
+    crate::localsend::cancel_send();
+}
+
+#[tauri::command]
+pub fn localsend_set_context_menu(enable: bool) -> R<bool> {
+    crate::localsend::set_context_menu_registered(enable).map_err(e)
+}
+

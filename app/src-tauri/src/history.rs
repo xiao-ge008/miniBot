@@ -60,6 +60,8 @@ pub struct ChatMessageRecord {
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
     #[serde(default)]
+    pub stats: Option<crate::llm::ChatStats>,
+    #[serde(default)]
     pub ts: i64,
 }
 
@@ -96,10 +98,13 @@ impl History {
                role TEXT NOT NULL,
                content TEXT NOT NULL,
                attachments_json TEXT NOT NULL DEFAULT '[]',
+               stats_json TEXT,
                ts INTEGER NOT NULL,
                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE);
              CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id ASC);",
         )?;
+        // 兼容旧版数据库平滑新增 stats_json 列
+        let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN stats_json TEXT", []);
         Ok(Self { conn: Mutex::new(conn), img_dir })
     }
 
@@ -228,7 +233,7 @@ impl History {
     pub fn chat_message_list(&self, session_id: &str) -> anyhow::Result<Vec<ChatMessageRecord>> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c.prepare(
-            "SELECT id, session_id, role, content, attachments_json, ts
+            "SELECT id, session_id, role, content, attachments_json, stats_json, ts
              FROM chat_messages
              WHERE session_id=?1
              ORDER BY id ASC",
@@ -236,13 +241,18 @@ impl History {
         let rows = stmt.query_map([session_id], |r| {
             let att_str: String = r.get(4)?;
             let attachments: Vec<ChatAttachment> = serde_json::from_str(&att_str).unwrap_or_default();
+            let stats_str: Option<String> = r.get(5).ok().flatten();
+            let stats: Option<crate::llm::ChatStats> = stats_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
             Ok(ChatMessageRecord {
                 id: r.get(0)?,
                 session_id: r.get(1)?,
                 role: r.get(2)?,
                 content: r.get(3)?,
                 attachments,
-                ts: r.get(5)?,
+                stats,
+                ts: r.get(6)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -254,13 +264,15 @@ impl History {
         role: &str,
         content: &str,
         attachments: &[ChatAttachment],
+        stats: Option<&crate::llm::ChatStats>,
     ) -> anyhow::Result<i64> {
         let now = chrono::Utc::now().timestamp();
         let att_json = serde_json::to_string(attachments).unwrap_or_else(|_| "[]".to_string());
+        let stats_json = stats.and_then(|s| serde_json::to_string(s).ok());
         let c = self.conn.lock().unwrap();
         c.execute(
-            "INSERT INTO chat_messages(session_id, role, content, attachments_json, ts) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![session_id, role, content, att_json, now],
+            "INSERT INTO chat_messages(session_id, role, content, attachments_json, stats_json, ts) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, role, content, att_json, stats_json, now],
         )?;
         let msg_id = c.last_insert_rowid();
 
@@ -292,5 +304,15 @@ impl History {
         }
 
         Ok(msg_id)
+    }
+
+    /// 删除指定会话中从 `from_id`（含）开始的所有消息，用于重新生成时彻底清理被污染的上下文
+    pub fn chat_message_delete_from(&self, session_id: &str, from_id: i64) -> anyhow::Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "DELETE FROM chat_messages WHERE session_id=?1 AND id >= ?2",
+            params![session_id, from_id],
+        )?;
+        Ok(())
     }
 }

@@ -1,6 +1,48 @@
 // 系统内置功能与简短提示词定义（无需用户手动配置）
-import type { ChatMessage, Payload, PayloadKind } from './types';
+import type { ChatMessage, Payload, PayloadKind, ReasoningEffort } from './types';
 import type { Surface } from './actions';
+
+export type { ReasoningEffort };
+
+export interface ReasoningLevelOption {
+  value: ReasoningEffort;
+  label: string;
+  shortLabel: string;
+  budgetTokens: number;
+}
+
+/** 对齐 llama.cpp 内置 WebUI 的思考强度档位与 token 预算映射 (ize) */
+export const REASONING_LEVELS: ReasoningLevelOption[] = [
+  { value: 'off', label: '关闭思考', shortLabel: '关', budgetTokens: 0 },
+  { value: 'low', label: '低强度 (512)', shortLabel: '低', budgetTokens: 512 },
+  { value: 'medium', label: '中强度 (2K)', shortLabel: '中', budgetTokens: 2048 },
+  { value: 'high', label: '高强度 (8K)', shortLabel: '高', budgetTokens: 8192 },
+  { value: 'max', label: '满血无限制 (Max)', shortLabel: '满', budgetTokens: -1 },
+];
+
+/** 构建对齐 llama.cpp /v1/chat/completions 的思考控制参数 */
+export function buildReasoningParams(effort: ReasoningEffort): Record<string, unknown> {
+  const enableThinking = effort !== 'off';
+  const budgetMap: Record<ReasoningEffort, number> = {
+    off: 0,
+    low: 512,
+    medium: 2048,
+    high: 8192,
+    max: -1,
+  };
+  const budget = budgetMap[effort] ?? 8192;
+  const out: Record<string, unknown> = {
+    reasoning_format: 'auto',
+    reasoning_control: true,
+    chat_template_kwargs: { enable_thinking: enableThinking },
+    thinking_budget_tokens: budget,
+    reasoning_budget_tokens: budget,
+  };
+  if (enableThinking) {
+    out.reasoning_effort = effort;
+  }
+  return out;
+}
 
 export interface AgentOption {
   key: string;
@@ -25,6 +67,8 @@ export interface Agent {
   chat?: boolean;
   /** 是否默认启用思考链 */
   thinking?: boolean;
+  /** 默认思考强度（对齐 llama.cpp WebUI：off | low | medium | high | max） */
+  reasoning_effort?: ReasoningEffort;
   surfaces?: Surface[];
   order?: number;
   temperature?: number;
@@ -42,7 +86,8 @@ export const BUILTIN_AGENTS: Agent[] = [
     surfaces: ['tip', 'capture'],
     order: 8,
     vision: true,
-    temperature: 0.1,
+    temperature: 0.2,
+    reasoning_effort: 'off',
     system:
       '你是智能视觉识别助手。若图片为文字则直接提取原文；若为公式则输出 $$ 包裹的 LaTeX；若为表格则输出 Markdown 表格；若为普通画面则用简短中文概括要点。',
     template: '请识别并提取这张图片的核心内容。',
@@ -57,6 +102,7 @@ export const BUILTIN_AGENTS: Agent[] = [
     replace: true,
     vision: false,
     temperature: 0.2,
+    reasoning_effort: 'off',
     system: '你是专业翻译助手。准确流畅地翻译内容，保留原格式与代码。只输出译文，不要解释。',
     template: '请把下面的内容翻译成{{target}}（风格：{{opt.style}}）：\n\n{{text}}',
     options: [{ key: 'style', label: '风格', choices: ['自然流畅', '直译', '学术严谨', '口语化'], default: '自然流畅' }],
@@ -69,7 +115,11 @@ export const BUILTIN_AGENTS: Agent[] = [
     surfaces: ['tip', 'capture', 'launcher'],
     order: 20,
     vision: true,
-    system: '你是简明解说助手。用通俗中文先一句话概括核心含义，再分点说明关键细节或解决方案。',
+    thinking: true,
+    reasoning_effort: 'high',
+    temperature: 0.6,
+    max_tokens: -1,
+    system: '请用通俗中文先一句话概括核心含义，再分点说明关键细节或解决方案。',
     template: '请解释下面的内容：\n\n{{text}}',
   },
   {
@@ -80,6 +130,7 @@ export const BUILTIN_AGENTS: Agent[] = [
     surfaces: ['tip', 'capture', 'launcher'],
     order: 30,
     vision: false,
+    reasoning_effort: 'off',
     system: '你是高效摘要助手。用简练中文提炼核心要点，忠于原文，条理清晰。',
     template: '请用「{{opt.length}}」的形式总结下面的内容：\n\n{{text}}',
     options: [{ key: 'length', label: '长度', choices: ['三条要点', '一句话', '详细摘要'], default: '三条要点' }],
@@ -93,6 +144,7 @@ export const BUILTIN_AGENTS: Agent[] = [
     order: 40,
     replace: true,
     temperature: 0.4,
+    reasoning_effort: 'off',
     system: '你是资深文字编辑。按要求润色改写文本，保持原意与原语言。只输出改写后的正文，不加任何解释。',
     template: '请对下面的文字做「{{opt.mode}}」处理：\n\n{{text}}',
     options: [
@@ -109,7 +161,10 @@ export const BUILTIN_AGENTS: Agent[] = [
     chat: true,
     vision: true,
     thinking: true,
-    system: '你是 miniBot 智能助手。请基于上下文准确、简洁地回答用户问题，重点突出。',
+    reasoning_effort: 'high',
+    temperature: 0.7,
+    max_tokens: -1,
+    system: '',
     template: '{{question}}\n\n参考内容：\n"""\n{{text}}\n"""',
   },
   {
@@ -121,6 +176,7 @@ export const BUILTIN_AGENTS: Agent[] = [
     order: 90,
     vision: true,
     temperature: 0,
+    reasoning_effort: 'off',
     system: '你是高精度 OCR 引擎。只输出提取的文字与 Markdown 表格，不加任何解释。',
     template: '逐字提取图片中的全部文字，保持原有段落与排版。',
   },
@@ -158,7 +214,10 @@ export function buildMessages(
   p: Payload,
   input: { text: string; image?: string | null; question?: string; opts: Record<string, string> },
 ): ChatMessage[] {
-  const msgs: ChatMessage[] = [{ role: 'system', content: agent.system }];
+  const msgs: ChatMessage[] = [];
+  if (agent.system && agent.system.trim()) {
+    msgs.push({ role: 'system', content: agent.system.trim() });
+  }
   if (input.image && agent.vision) {
     const prompt = input.text
       ? fillTemplate(agent, { ...input, text: input.text })

@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-release-${{ github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build-tauri:
     name: Build (${{ matrix.name }})

@@ -449,11 +449,21 @@ pub fn chat_message_add(
     role: String,
     content: String,
     attachments: Vec<crate::history::ChatAttachment>,
+    stats: Option<crate::llm::ChatStats>,
 ) -> R<i64> {
     st.history
         .as_ref()
         .ok_or("历史库不可用")?
-        .chat_message_add(&session_id, &role, &content, &attachments)
+        .chat_message_add(&session_id, &role, &content, &attachments, stats.as_ref())
+        .map_err(e)
+}
+
+#[tauri::command]
+pub fn chat_message_delete_from(st: State<AppState>, session_id: String, from_id: i64) -> R<()> {
+    st.history
+        .as_ref()
+        .ok_or("历史库不可用")?
+        .chat_message_delete_from(&session_id, from_id)
         .map_err(e)
 }
 

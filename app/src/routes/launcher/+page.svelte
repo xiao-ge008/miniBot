@@ -7,15 +7,16 @@
   import { onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
+    formatChatStats,
     formatSearchContext,
     ipc,
     onChatCapture,
     onLlmStatus,
     onOutsideClick,
     onPayload,
-    shouldAutoWebSearch,
     uid,
   } from '$lib/core/ipc';
+  import { buildReasoningParams, REASONING_LEVELS, type ReasoningEffort } from '$lib/core/agents';
   import { renderMarkdown } from '$lib/core/markdown';
   import { stopSpeak, tts } from '$lib/core/tts.svelte';
   import GpuBusy from '$lib/components/GpuBusy.svelte';
@@ -25,10 +26,13 @@
     ChatMessage,
     ChatMessageRecord,
     ChatSession,
+    ChatStats,
     GpuSnapshot,
     LlmError,
     SearchHit,
     StatusInfo,
+    UpdateDownloadProgress,
+    UpdateInfo,
   } from '$lib/core/types';
 
   const win = getCurrentWindow();
@@ -38,20 +42,34 @@
   let currentSessionId = $state<string>('');
   let messages = $state<ChatMessageRecord[]>([]);
 
-  // 输入与附件状态
+  // 输入与附件状态（对齐 llama.cpp WebUI：默认开启高思考强度，联网默认关闭）
   let inputText = $state('');
   let pendingAttachments = $state<ChatAttachment[]>([]);
   let parsingMedia = $state(false);
   let dragOver = $state(false);
-  let enableThinking = $state(false);
-  let enableWebSearch = $state(true);
+  let reasoningEffort = $state<ReasoningEffort>('high');
+  let enableWebSearch = $state(false);
   let searchingWeb = $state(false);
   let lastSearchHits = $state<SearchHit[]>([]);
+
+  function setReasoningEffort(level: ReasoningEffort) {
+    reasoningEffort = level;
+    try {
+      localStorage.setItem('minibot.reasoning_effort', level);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toggleReasoningQuick() {
+    setReasoningEffort(reasoningEffort === 'off' ? 'high' : 'off');
+  }
 
   // 流式推理状态
   type Stage = 'idle' | 'loading' | 'streaming' | 'error' | 'gpu';
   let stage = $state<Stage>('idle');
   let streamingOutput = $state('');
+  let streamingStats = $state<ChatStats | null>(null);
   let errorMsg = $state('');
   let gpu = $state<{ snapshot: GpuSnapshot; required: number } | null>(null);
   let reqId = '';
@@ -63,6 +81,62 @@
   let openThinks = $state<Record<string, boolean>>({});
   let streamingThinkOpen = $state(false);
   let copiedId = $state<string | number>('');
+
+  // 在线版本更新提示状态
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let updateDismissed = $state(false);
+  let downloadingUpdate = $state(false);
+  let updateDlProgress = $state<UpdateDownloadProgress | null>(null);
+  let updateError = $state('');
+  let lastUpdateCheckAt = 0;
+
+  async function checkUpdateSilent(force = false) {
+    if (downloadingUpdate) return;
+    if (!force && Date.now() - lastUpdateCheckAt < 60_000 && updateInfo) return;
+    lastUpdateCheckAt = Date.now();
+    try {
+      const res = await ipc.appCheckUpdate();
+      updateInfo = res;
+    } catch {
+      /* 静默检查忽略网络异常 */
+    }
+  }
+
+  async function handleOneClickUpdate() {
+    if (downloadingUpdate || !updateInfo?.download_url) return;
+    downloadingUpdate = true;
+    updateError = '';
+    updateDlProgress = {
+      stage: 'downloading',
+      file_name: updateInfo.asset_name || `miniBot_${updateInfo.latest_version}_x64-setup.exe`,
+      downloaded_mb: 0,
+      total_mb: updateInfo.asset_size_mb || 0,
+      speed_mbps: 0,
+      percent: 1,
+      saved_path: '',
+      message: '正在准备下载新版本安装包…',
+    };
+    try {
+      const savedPath = await ipc.appDownloadUpdate(
+        updateInfo.download_url,
+        updateInfo.asset_name,
+        true,
+        (p) => {
+          updateDlProgress = p;
+        },
+      );
+      if (savedPath) {
+        await ipc.appInstallUpdate(savedPath);
+      }
+    } catch (e) {
+      const errStr = String(e);
+      if (!errStr.includes('已取消')) {
+        updateError = errStr;
+      }
+    } finally {
+      downloadingUpdate = false;
+    }
+  }
 
   let scroller: HTMLDivElement;
   let textareaEl: HTMLTextAreaElement;
@@ -409,12 +483,10 @@
     }
   }
 
-  // ---------- 发送与流式多轮对话 ----------
+  // ---------- 发送与流式多轮对话（完全对齐 llama.cpp 内置 WebUI） ----------
 
   function buildOpenAiMessages(historyRecords: ChatMessageRecord[], webSearchCtx = ''): ChatMessage[] {
-    const sysPrompt =
-      '你是 miniBot，一个极简、直接、聪明的桌面 AI 助手，已内置免费实时联网搜索引擎。当用户问题附带【实时联网搜索参考资料】时，请优先结合这些最新网络信息准确回答用户问题；若用户询问你能否联网搜索，请明确告知用户你具备实时联网搜索能力并结合实时搜索结果回答。当用户上传图片或视频关键帧故事板时，请仔细观察画面细节并给出详尽解答。';
-    const out: ChatMessage[] = [{ role: 'system', content: sysPrompt }];
+    const out: ChatMessage[] = [];
 
     // 只保留最近 2 轮带图消息的原始 base64 图像，防止超长多轮对话撑满视觉上下文
     const mediaMsgIndices = historyRecords
@@ -442,15 +514,20 @@
         ].join('\n');
         parts.push({ type: 'text', text: combinedText });
         out.push({ role: 'user', content: parts });
+      } else if (m.role === 'assistant') {
+        const parsed = splitThink(m.content);
+        const msgObj: ChatMessage = {
+          role: 'assistant',
+          content: parsed.answer,
+        };
+        if (parsed.think) {
+          msgObj.reasoning_content = parsed.think;
+        }
+        out.push(msgObj);
       } else {
-        // 清理历史回答中的 <think> 标签，节省上下文 token
-        const cleanContent =
-          m.role === 'assistant'
-            ? m.content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-            : m.content + extraSearch;
         out.push({
           role: m.role as 'user' | 'assistant',
-          content: cleanContent || '（已上传媒体文件）',
+          content: (m.content.trim() || '（已上传媒体文件）') + extraSearch,
         });
       }
     });
@@ -498,8 +575,43 @@
     await runStream(force);
   }
 
-  async function runStream(force = false) {
+  /**
+   * 重新生成指定索引处的 AI 回复：
+   * 先从数据库和前端 messages 状态中彻底删除该条 AI 回复（及其后续消息），
+   * 确保旧回复不会残留在上下文里污染模型，随后禁用 KV Cache 缓存重新发起推理。
+   */
+  async function regenerateMessage(index: number) {
+    if (busy || parsingMedia) return;
+    const target = messages[index];
+    if (!target) return;
+
+    // 确定需要截断删除的起始位置（如果点击的是 assistant 消息，从该条开始删；如果是 user 消息，从下一条开始删）
+    const cutIdx = target.role === 'assistant' ? index : index + 1;
+    const firstRemoved = messages[cutIdx];
+    if (firstRemoved && currentSessionId && firstRemoved.id != null) {
+      try {
+        await ipc.chatMessageDeleteFrom(currentSessionId, firstRemoved.id);
+      } catch {
+        /* 忽略清理异常 */
+      }
+    }
+
+    // 清理被删除消息关联的思考折叠状态，并截断前端上下文数组
+    for (let k = cutIdx; k < messages.length; k++) {
+      const mKey = String(messages[k]?.id ?? k);
+      delete openThinks[mKey];
+    }
+    messages = messages.slice(0, cutIdx);
+    stopSpeak();
+
+    await tick();
+    scrollDown();
+    await runStream(false, true);
+  }
+
+  async function runStream(force = false, regenerate = false) {
     streamingOutput = '';
+    streamingStats = null;
     errorMsg = '';
     gpu = null;
     streamingThinkOpen = false;
@@ -507,14 +619,14 @@
     stage = 'loading';
     reqId = uid('chat');
 
-    // 检查是否需要执行免费联网搜索
+    // 仅当用户手动开启「🌐 联网」开关时才执行联网检索（默认关闭，不自动触发）
     let webSearchCtx = '';
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     const userQuery = lastUser?.content?.trim() ?? '';
     const isDefaultMediaPrompt =
       userQuery === '请识别并分析这张图片的内容' || userQuery === '请识别并分析这个视频的内容';
 
-    if (userQuery && !isDefaultMediaPrompt && (enableWebSearch || shouldAutoWebSearch(userQuery))) {
+    if (enableWebSearch && userQuery && !isDefaultMediaPrompt) {
       searchingWeb = true;
       try {
         const effectiveQuery = /你能联网|可以联网|能搜索吗|会联网吗/.test(userQuery)
@@ -531,6 +643,7 @@
     }
 
     const openAiMsgs = buildOpenAiMessages(messages, webSearchCtx);
+    let latestStats: ChatStats | null = null;
 
     try {
       const full = await ipc.llmChat(
@@ -542,21 +655,36 @@
             streamingOutput += e.text;
             scrollDown();
           }
+          if (e.type === 'stats') {
+            const s: ChatStats = {
+              tokens: e.tokens,
+              tokens_per_sec: e.tokens_per_sec,
+              duration_ms: e.duration_ms,
+            };
+            latestStats = s;
+            streamingStats = s;
+          }
         },
         {
           force,
           params: {
-            temperature: 0.4,
-            max_tokens: 2048,
-            chat_template_kwargs: { enable_thinking: enableThinking },
+            temperature: 0.7,
+            top_p: 0.95,
+            top_k: 40,
+            min_p: 0.05,
+            max_tokens: -1,
+            cache_prompt: !regenerate,
+            ...buildReasoningParams(reasoningEffort),
           },
         },
       );
       const finalOut = (full || streamingOutput).trim();
+      const finalStats = latestStats;
       stage = 'idle';
       streamingOutput = '';
+      streamingStats = null;
       if (finalOut) {
-        const aid = await ipc.chatMessageAdd(currentSessionId, 'assistant', finalOut, []);
+        const aid = await ipc.chatMessageAdd(currentSessionId, 'assistant', finalOut, [], finalStats);
         messages = [
           ...messages,
           {
@@ -565,6 +693,7 @@
             role: 'assistant',
             content: finalOut,
             attachments: [],
+            stats: finalStats,
             ts: Math.floor(Date.now() / 1000),
           },
         ];
@@ -579,8 +708,15 @@
         gpu = { snapshot: e.snapshot, required: e.required_mb };
         stage = 'gpu';
       } else if (e?.kind === 'cancelled') {
+        const finalStats = latestStats;
         if (streamingOutput.trim()) {
-          const aid = await ipc.chatMessageAdd(currentSessionId, 'assistant', streamingOutput.trim(), []);
+          const aid = await ipc.chatMessageAdd(
+            currentSessionId,
+            'assistant',
+            streamingOutput.trim(),
+            [],
+            finalStats,
+          );
           messages = [
             ...messages,
             {
@@ -589,11 +725,13 @@
               role: 'assistant',
               content: streamingOutput.trim(),
               attachments: [],
+              stats: finalStats,
               ts: Math.floor(Date.now() / 1000),
             },
           ];
         }
         streamingOutput = '';
+        streamingStats = null;
         stage = 'idle';
       } else if (e?.kind === 'port_busy') {
         stage = 'error';
@@ -652,11 +790,23 @@
 
   onMount(() => {
     openedAt = Date.now();
+    try {
+      const saved = localStorage.getItem('minibot.reasoning_effort') as ReasoningEffort | null;
+      if (saved && ['off', 'low', 'medium', 'high', 'max'].includes(saved)) {
+        reasoningEffort = saved;
+      } else {
+        reasoningEffort = 'high';
+      }
+    } catch {
+      reasoningEffort = 'high';
+    }
     loadSessions(true);
+    checkUpdateSilent(true);
     const unP = onPayload(() => {
       openedAt = Date.now();
       win.setAlwaysOnTop(pinned).catch(() => {});
       loadSessions(false);
+      checkUpdateSilent(false);
       textareaEl?.focus();
     });
     const unC = onChatCapture((data) => {
@@ -779,6 +929,9 @@
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
         <span>设置</span>
+        {#if updateInfo?.has_update}
+          <span class="side-up-dot" title="发现新版本 v{updateInfo.latest_version}">NEW</span>
+        {/if}
       </button>
 
       <button
@@ -860,6 +1013,34 @@
       </div>
     </header>
 
+    {#if updateInfo?.has_update && !updateDismissed}
+      <div class="update-banner">
+        <div class="ub-main">
+          {#if downloadingUpdate && updateDlProgress}
+            <span class="ub-text">
+              🚀 {updateDlProgress.message} ({updateDlProgress.percent}%)
+            </span>
+          {:else}
+            <span class="ub-badge">新版本</span>
+            <span class="ub-text">
+              发现 miniBot <b>v{updateInfo.latest_version}</b>（当前 v{updateInfo.current_version}）
+              {#if updateError}
+                <span class="ub-err">· {updateError}</span>
+              {/if}
+            </span>
+          {/if}
+        </div>
+        <div class="ub-actions">
+          {#if downloadingUpdate}
+            <button class="ub-btn ghost" onclick={() => ipc.appCancelUpdateDownload()}>取消</button>
+          {:else}
+            <button class="ub-btn primary" onclick={handleOneClickUpdate}>立即更新</button>
+            <button class="ub-btn close" onclick={() => (updateDismissed = true)} title="忽略本次提示">✕</button>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     <div class="chat-body" bind:this={scroller}>
       {#if messages.length === 0 && !busy && !errorMsg && !gpu}
         <div class="empty-state">
@@ -919,6 +1100,7 @@
                   <button class="think-toggle" onclick={() => toggleThink(key)}>
                     <span class="think-arrow" class:open={!!openThinks[key]}>▸</span>
                     <span>已深度思考</span>
+                    <span class="think-len">{parsed.think.length} 字</span>
                   </button>
                   {#if openThinks[key]}
                     <div class="think-content selectable">{parsed.think}</div>
@@ -936,6 +1118,17 @@
                 <button class="tool-btn" onclick={() => copyReply(key, msg.content)}>
                   {copiedId === key ? '✓ 已复制' : '复制'}
                 </button>
+                <button
+                  class="tool-btn"
+                  onclick={() => regenerateMessage(i)}
+                  disabled={busy}
+                  title="删除当前回复及后续上下文并重新生成，避免旧回复污染上下文"
+                >
+                  重新生成
+                </button>
+                {#if msg.stats && formatChatStats(msg.stats)}
+                  <span class="msg-stats" title="生成速度与消耗时长">⚡ {formatChatStats(msg.stats)}</span>
+                {/if}
               </div>
             </div>
           </div>
@@ -977,8 +1170,12 @@
                   {#if streamParsed.thinking}
                     <span class="pulse-dot"></span>
                     <span>正在深度思考…</span>
+                    {#if streamParsed.think}
+                      <span class="think-len">{streamParsed.think.length} 字</span>
+                    {/if}
                   {:else}
                     <span>已深度思考</span>
+                    <span class="think-len">{streamParsed.think.length} 字</span>
                   {/if}
                 </button>
                 {#if streamingThinkOpen && streamParsed.think}
@@ -993,6 +1190,12 @@
               <div class="state-line">
                 <span class="pulse-dot"></span>
                 <span>正在生成回复…</span>
+              </div>
+            {/if}
+
+            {#if streamingStats && formatChatStats(streamingStats)}
+              <div class="ai-toolbar visible">
+                <span class="msg-stats live">⚡ {formatChatStats(streamingStats)}</span>
               </div>
             {/if}
           </div>
@@ -1108,14 +1311,29 @@
             <span>图片/视频</span>
           </button>
 
-          <button
-            class="c-tool"
-            class:active={enableThinking}
-            onclick={() => (enableThinking = !enableThinking)}
-            title="开启或关闭深度思考链"
-          >
-            <span>💭 思考</span>
-          </button>
+          <div class="think-effort-group" class:active={reasoningEffort !== 'off'}>
+            <button
+              type="button"
+              class="think-main-btn"
+              onclick={toggleReasoningQuick}
+              title={reasoningEffort === 'off' ? '点击开启高强度深度思考' : '点击关闭思考'}
+            >
+              <span>💭 思考强度</span>
+            </button>
+            <div class="think-levels" role="radiogroup" aria-label="思考强度">
+              {#each REASONING_LEVELS as lv (lv.value)}
+                <button
+                  type="button"
+                  class="think-lv-btn"
+                  class:selected={reasoningEffort === lv.value}
+                  onclick={() => setReasoningEffort(lv.value)}
+                  title={lv.label}
+                >
+                  {lv.shortLabel}
+                </button>
+              {/each}
+            </div>
+          </div>
 
           <button
             class="c-tool"
@@ -1137,7 +1355,7 @@
             class="c-tool"
             class:active={enableWebSearch}
             onclick={() => (enableWebSearch = !enableWebSearch)}
-            title="开启或关闭免费实时联网搜索（Bing / 360 / DuckDuckGo 聚合）"
+            title={enableWebSearch ? '已开启实时联网搜索（点击关闭）' : '默认关闭联网，点击可开启实时联网搜索'}
           >
             <span>🌐 联网</span>
           </button>
@@ -1569,6 +1787,18 @@
     color: var(--fg);
     background: var(--hover);
   }
+  .msg-stats {
+    font-size: 11px;
+    color: var(--fg-dim);
+    opacity: 0.85;
+    margin-left: 4px;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+  .msg-stats.live {
+    margin-left: 0;
+    color: var(--accent-blue);
+  }
 
   /* 思考折叠框 */
   .web-hits-pill {
@@ -1587,6 +1817,11 @@
     background: rgba(128, 128, 128, 0.05);
     border: 1px solid var(--border);
     overflow: hidden;
+  }
+  .think-len {
+    font-size: 11px;
+    opacity: 0.65;
+    margin-left: 2px;
   }
   .think-toggle {
     width: 100%;
@@ -1823,6 +2058,66 @@
     border-color: var(--fg-dim);
     font-weight: 500;
   }
+  .think-effort-group {
+    display: inline-flex;
+    align-items: center;
+    height: 26px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    padding: 0 3px 0 8px;
+    gap: 4px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .think-effort-group.active {
+    border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent-blue) 6%, transparent);
+  }
+  .think-main-btn {
+    border: none;
+    background: transparent;
+    color: var(--fg-dim);
+    font-size: 11.5px;
+    padding: 0 2px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+  }
+  .think-effort-group.active .think-main-btn {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .think-levels {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 1px;
+    border: 1px solid var(--border);
+  }
+  .think-lv-btn {
+    border: none;
+    background: transparent;
+    color: var(--fg-dim);
+    font-size: 11px;
+    height: 18px;
+    min-width: 20px;
+    padding: 0 5px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .think-lv-btn:hover {
+    color: var(--fg);
+    background: var(--hover);
+  }
+  .think-lv-btn.selected {
+    background: var(--fg);
+    color: var(--bg-solid);
+    font-weight: 600;
+  }
   .spacer {
     flex: 1;
   }
@@ -1889,5 +2184,76 @@
     max-height: calc(88vh - 50px);
     object-fit: contain;
     border-radius: 8px;
+  }
+
+  /* 新版本更新提醒横幅 */
+  .side-up-dot {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 99px;
+    background: var(--accent-blue);
+    color: #fff;
+    line-height: 1.2;
+  }
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 14px;
+    background: color-mix(in srgb, var(--accent-blue) 10%, var(--panel));
+    border-bottom: 1px solid color-mix(in srgb, var(--accent-blue) 30%, var(--border));
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .ub-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .ub-badge {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 99px;
+    background: var(--accent-blue);
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .ub-text {
+    color: var(--fg);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ub-err {
+    color: var(--danger);
+  }
+  .ub-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .ub-btn {
+    padding: 2px 10px;
+    font-size: 11.5px;
+    border-radius: 5px;
+    height: 24px;
+  }
+  .ub-btn.primary {
+    background: var(--accent-blue);
+    color: #fff;
+    border-color: var(--accent-blue);
+    font-weight: 500;
+  }
+  .ub-btn.close {
+    padding: 0 5px;
+    border: none;
+    background: transparent;
+    color: var(--fg-dim);
   }
 </style>

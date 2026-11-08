@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   ChatMessageRecord,
   ChatSession,
+  ChatStats,
   CloudTestResult,
   DownloadProgress,
   EngineOverview,
@@ -103,8 +104,15 @@ export const ipc = {
   chatSessionRename: (id: string, title: string) => invoke<void>('chat_session_rename', { id, title }),
   chatSessionDelete: (id: string) => invoke<void>('chat_session_delete', { id }),
   chatMessageList: (sessionId: string) => invoke<ChatMessageRecord[]>('chat_message_list', { sessionId }),
-  chatMessageAdd: (sessionId: string, role: string, content: string, attachments: ChatAttachment[] = []) =>
-    invoke<number>('chat_message_add', { sessionId, role, content, attachments }),
+  chatMessageAdd: (
+    sessionId: string,
+    role: string,
+    content: string,
+    attachments: ChatAttachment[] = [],
+    stats?: ChatStats | null,
+  ) => invoke<number>('chat_message_add', { sessionId, role, content, attachments, stats: stats ?? null }),
+  chatMessageDeleteFrom: (sessionId: string, fromId: number) =>
+    invoke<void>('chat_message_delete_from', { sessionId, fromId }),
 
   listUserAgents: () => invoke<unknown[]>('list_user_agents'),
   saveUserAgent: (agent: unknown) => invoke<void>('save_user_agent', { agent }),
@@ -186,13 +194,9 @@ export function onTtsEvent(cb: (data: { action: string; id?: string; token?: str
   return listen<{ action: string; id?: string; token?: string }>('minibot://tts', (e) => cb(e.payload));
 }
 
-/** 智能判断用户提问是否需要触发联网搜索 */
-export function shouldAutoWebSearch(text: string): boolean {
-  const t = text.trim();
-  if (!t || t.length < 2) return false;
-  return /联网|搜索|搜一下|查一下|查询|最新|今天|昨日|昨天|今年|现在|目前|近期|最近|2024|2025|2026|新闻|天气|股价|汇率|价格|比分|官网|网址|链接|是谁|是什么|为什么|怎么|如何|哪里|哪个|多少|介绍|百科|评价|对比|news|search|latest|today|price/i.test(
-    t,
-  );
+/** 默认关闭自动联网搜索 */
+export function shouldAutoWebSearch(_text: string): boolean {
+  return false;
 }
 
 /** 将联网搜索结果格式化为注入给模型的上下文文本 */
@@ -202,6 +206,14 @@ export function formatSearchContext(resp: SearchResponse): string {
     (h: SearchHit, idx: number) => `[${idx + 1}] 标题：${h.title}\n摘要：${h.snippet}\n链接：${h.url}`,
   );
   return `\n\n【实时联网搜索参考资料（当前时间：${resp.date}，关键词：${resp.query}）】\n${lines.join('\n\n')}\n\n请优先依据上述实时联网搜索资料准确、简洁地回答用户问题。`;
+}
+
+/** 格式化 AI 回复的 token 速度与消耗时长 */
+export function formatChatStats(stats?: ChatStats | null): string {
+  if (!stats || (stats.tokens <= 0 && stats.duration_ms <= 0)) return '';
+  const sec = (stats.duration_ms / 1000).toFixed(stats.duration_ms < 10000 ? 2 : 1);
+  const tps = stats.tokens_per_sec > 0 ? stats.tokens_per_sec.toFixed(1) : '0.0';
+  return `${tps} tokens/s · 耗时 ${sec}s (${stats.tokens} tokens)`;
 }
 
 let seq = 0;

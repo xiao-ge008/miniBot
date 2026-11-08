@@ -72,9 +72,9 @@ Write-Host "[1/3] 已同步更新 package.json / tauri.conf.json / Cargo.toml �
 
 # 4. Git 提交并打 Tag
 git add .
-git commit -m "chore(release): v$newVer - $Message"
-git tag -f "v$newVer" -m "miniBot v$newVer: $Message"
-Write-Host "[2/3] 已创建 Git 提交与标签 v$newVer" -ForegroundColor Green
+git commit -m "chore(release): v${newVer} - $Message"
+git tag -f "v${newVer}" -m "miniBot v${newVer}: $Message"
+Write-Host "[2/3] 已创建 Git 提交与标签 v${newVer}" -ForegroundColor Green
 
 # 5. 推送到 GitHub 触发 Actions 自动打包与 Release 发布
 git push origin main

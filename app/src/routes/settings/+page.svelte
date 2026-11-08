@@ -435,7 +435,7 @@
       result_width: loaded.ui?.result_width || 520,
       result_height: loaded.ui?.result_height || 460,
     };
-    if (!loaded.llm.ctx || loaded.llm.ctx === 20480) loaded.llm.ctx = 8192;
+    if (!loaded.llm.ctx || loaded.llm.ctx === 20480 || loaded.llm.ctx === 8192) loaded.llm.ctx = 32768;
     if (!loaded.llm.mirror) loaded.llm.mirror = 'hf-mirror';
     if (!loaded.llm.api_provider) loaded.llm.api_provider = 'siliconflow';
     if (!loaded.llm.api_base_url) loaded.llm.api_base_url = 'https://api.siliconflow.cn/v1';
@@ -1175,29 +1175,31 @@
               </div>
             </section>
 
-            <!-- 4. 高级设置（默认折叠，小白无需关心，默认 8K 上下文） -->
+            <!-- 4. 高级设置（默认折叠，小白无需关心，默认 32K 上下文） -->
             <section class="rt-section">
               <button class="adv-toggle" type="button" onclick={() => (advOpen = !advOpen)}>
                 <span class="adv-arrow" class:open={advOpen}>▸</span>
-                <span>高级设置（默认 8K 上下文，普通用户无需修改）</span>
+                <span>高级设置（默认 32K 上下文，普通用户无需修改）</span>
               </button>
 
               {#if advOpen}
                 <div class="card adv-card">
                   <div class="grid-2">
                     <label class="field">
-                      <span>上下文窗口长度（默认 8192 = 8K）</span>
+                      <span>上下文窗口长度（默认 32768 = 32K）</span>
                       <select
                         value={String(s.llm.ctx)}
                         onchange={(e) => {
-                          s!.llm.ctx = Number((e.currentTarget as HTMLSelectElement).value) || 8192;
+                          s!.llm.ctx = Number((e.currentTarget as HTMLSelectElement).value) || 32768;
                           save();
                         }}
                       >
                         <option value="4096">4K (4096 · 极省显存)</option>
-                        <option value="8192">8K (8192 · 默认推荐)</option>
-                        <option value="16384">16K (16384 · 长文档)</option>
-                        <option value="32768">32K (32768 · 大显存适用)</option>
+                        <option value="8192">8K (8192 · 轻量窗口)</option>
+                        <option value="16384">16K (16384 · 标准窗口)</option>
+                        <option value="32768">32K (32768 · 默认推荐)</option>
+                        <option value="65536">64K (65536 · 超长文档)</option>
+                        <option value="100128">100K (100128 · 满血上下文)</option>
                       </select>
                     </label>
                     <label class="field">

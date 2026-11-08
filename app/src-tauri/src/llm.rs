@@ -162,12 +162,24 @@ impl<E: std::fmt::Display> From<E> for LlmError {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, serde::Deserialize)]
+pub struct ChatStats {
+    pub tokens: u64,
+    pub tokens_per_sec: f64,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
     Loading,
     Started,
     Delta { text: String },
+    Stats {
+        tokens: u64,
+        tokens_per_sec: f64,
+        duration_ms: u64,
+    },
 }
 
 pub struct ActiveGuard(Arc<LlmManager>);
@@ -336,9 +348,9 @@ impl LlmManager {
             "--no-webui".into(),
         ];
 
-        // 仅在 NVIDIA CUDA 后端下启用量化 KV Cache + FlashAttention；AMD/Intel Vulkan 与 CPU 使用标准 F16 KV Cache 以保证 100% 算子兼容
+        // 在 NVIDIA CUDA 后端下启用量化 KV Cache（对齐 LFM.bat：-ctk q8_0 -ctv q8_0）
         if has_cuda {
-            args.extend(["-fa".into(), "on".into(), "-ctk".into(), "q8_0".into(), "-ctv".into(), "q8_0".into()]);
+            args.extend(["-ctk".into(), "q8_0".into(), "-ctv".into(), "q8_0".into()]);
         }
 
         if !cfg.mmproj_path.is_empty() && std::path::Path::new(&cfg.mmproj_path).exists() {
@@ -539,11 +551,12 @@ impl LlmManager {
         let temperature = params
             .get("temperature")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.3);
-        let max_tokens = params
+            .unwrap_or(0.7);
+        let raw_max_tokens = params
             .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2048);
+            .and_then(|v| v.as_i64())
+            .unwrap_or(4096);
+        let max_tokens: u64 = if raw_max_tokens <= 0 { 4096 } else { raw_max_tokens as u64 };
 
         let mut body = serde_json::json!({
             "model": model,
@@ -619,6 +632,11 @@ impl LlmManager {
             });
         }
 
+        let req_start = Instant::now();
+        let mut gen_start: Option<Instant> = None;
+        let mut chunk_tokens = 0u64;
+        let mut usage_tokens = 0u64;
+
         let _ = on.send(ChatEvent::Started);
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
@@ -644,7 +662,11 @@ impl LlmManager {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                             if let Some(c) = v.pointer("/choices/0/message/content").and_then(|x| x.as_str()) {
                                 full.push_str(c);
+                                chunk_tokens += (c.chars().count() as u64).max(1);
                                 let _ = on.send(ChatEvent::Delta { text: c.to_string() });
+                            }
+                            if let Some(ut) = v.pointer("/usage/completion_tokens").and_then(|x| x.as_u64()) {
+                                usage_tokens = ut;
                             }
                         }
                     }
@@ -656,12 +678,27 @@ impl LlmManager {
                         full.push_str("</think>\n\n");
                         let _ = on.send(ChatEvent::Delta { text: "</think>\n\n".to_string() });
                     }
+                    let duration_ms = req_start.elapsed().as_millis() as u64;
+                    let gen_secs = gen_start
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or_else(|| req_start.elapsed().as_secs_f64())
+                        .max(0.05);
+                    let tokens = if usage_tokens > 0 { usage_tokens } else { chunk_tokens.max(1) };
+                    let tokens_per_sec = ((tokens as f64 / gen_secs) * 10.0).round() / 10.0;
+                    let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
                     return Ok(full);
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(ut) = v.pointer("/usage/completion_tokens").and_then(|x| x.as_u64()) {
+                        if ut > 0 {
+                            usage_tokens = ut;
+                        }
+                    }
                     let delta = &v["choices"][0]["delta"];
+                    let mut got_token = false;
                     if let Some(r) = delta["reasoning_content"].as_str() {
                         if !r.is_empty() {
+                            got_token = true;
                             if !in_reasoning {
                                 in_reasoning = true;
                                 full.push_str("<think>");
@@ -673,6 +710,7 @@ impl LlmManager {
                     }
                     if let Some(t) = delta["content"].as_str() {
                         if !t.is_empty() {
+                            got_token = true;
                             if in_reasoning {
                                 in_reasoning = false;
                                 full.push_str("</think>\n\n");
@@ -682,6 +720,17 @@ impl LlmManager {
                             let _ = on.send(ChatEvent::Delta { text: t.to_string() });
                         }
                     }
+                    if got_token {
+                        if gen_start.is_none() {
+                            gen_start = Some(Instant::now());
+                        }
+                        chunk_tokens += 1;
+                        let duration_ms = req_start.elapsed().as_millis() as u64;
+                        let gen_secs = gen_start.unwrap().elapsed().as_secs_f64().max(0.05);
+                        let tokens = if usage_tokens > 0 { usage_tokens } else { chunk_tokens };
+                        let tokens_per_sec = ((tokens as f64 / gen_secs) * 10.0).round() / 10.0;
+                        let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
+                    }
                 }
             }
         }
@@ -689,6 +738,14 @@ impl LlmManager {
             full.push_str("</think>\n\n");
             let _ = on.send(ChatEvent::Delta { text: "</think>\n\n".to_string() });
         }
+        let duration_ms = req_start.elapsed().as_millis() as u64;
+        let gen_secs = gen_start
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or_else(|| req_start.elapsed().as_secs_f64())
+            .max(0.05);
+        let tokens = if usage_tokens > 0 { usage_tokens } else { chunk_tokens.max(1) };
+        let tokens_per_sec = ((tokens as f64 / gen_secs) * 10.0).round() / 10.0;
+        let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
         Ok(full)
     }
 
@@ -703,14 +760,26 @@ impl LlmManager {
         let llm_cfg = app.state::<crate::AppState>().settings.get().llm;
         let port = llm_cfg.port;
         let required_mb = llm_cfg.required_vram_mb;
+        let req_start = Instant::now();
+        let mut gen_start: Option<Instant> = None;
+        let mut chunk_tokens = 0u64;
+        let mut server_tokens = 0u64;
+        let mut server_tps = 0.0f64;
+
         let mut body = serde_json::json!({
             "messages": messages,
             "stream": true,
             "cache_prompt": true,
-            "temperature": 0.3,
-            "max_tokens": 2048,
-            // 小工具场景追求速度：默认关闭思考链（智能体可通过 params 覆盖）
-            "chat_template_kwargs": { "enable_thinking": false },
+            "timings_per_token": true,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "top_k": 40,
+            "min_p": 0.05,
+            "max_tokens": -1,
+            "reasoning_format": "auto",
+            "reasoning_control": true,
+            // 默认开启深度思考链（对齐 llama.cpp 原生模板）
+            "chat_template_kwargs": { "enable_thinking": true },
         });
         if let (Some(b), Some(p)) = (body.as_object_mut(), params.as_object()) {
             for (k, v) in p {
@@ -749,6 +818,17 @@ impl LlmManager {
                 if let Some(ye) = self.yield_error(required_mb) {
                     return Err(ye);
                 }
+                let duration_ms = req_start.elapsed().as_millis() as u64;
+                let tokens = if server_tokens > 0 { server_tokens } else { chunk_tokens };
+                if tokens > 0 {
+                    let tokens_per_sec = if server_tps > 0.0 {
+                        (server_tps * 10.0).round() / 10.0
+                    } else {
+                        let gen_secs = gen_start.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.1).max(0.05);
+                        ((tokens as f64 / gen_secs) * 10.0).round() / 10.0
+                    };
+                    let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
+                }
                 return Err(LlmError::Cancelled);
             }
             let bytes = match chunk {
@@ -771,12 +851,51 @@ impl LlmManager {
                         full.push_str("</think>\n\n");
                         let _ = on.send(ChatEvent::Delta { text: "</think>\n\n".to_string() });
                     }
+                    let duration_ms = req_start.elapsed().as_millis() as u64;
+                    let tokens = if server_tokens > 0 { server_tokens } else { chunk_tokens.max(1) };
+                    let tokens_per_sec = if server_tps > 0.0 {
+                        (server_tps * 10.0).round() / 10.0
+                    } else {
+                        let gen_secs = gen_start
+                            .map(|t| t.elapsed().as_secs_f64())
+                            .unwrap_or_else(|| req_start.elapsed().as_secs_f64())
+                            .max(0.05);
+                        ((tokens as f64 / gen_secs) * 10.0).round() / 10.0
+                    };
+                    let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
                     return Ok(full);
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    // 提取 llama-server 原生 timings 统计
+                    if let Some(timings) = v.get("timings") {
+                        if let Some(pn) = timings.get("predicted_n").and_then(|x| x.as_u64()) {
+                            if pn > 0 {
+                                server_tokens = pn;
+                            }
+                        }
+                        if let Some(pps) = timings.get("predicted_per_second").and_then(|x| x.as_f64()) {
+                            if pps > 0.0 {
+                                server_tps = pps;
+                            }
+                        } else if let (Some(pn), Some(pms)) = (
+                            timings.get("predicted_n").and_then(|x| x.as_f64()),
+                            timings.get("predicted_ms").and_then(|x| x.as_f64()),
+                        ) {
+                            if pn > 0.0 && pms > 0.0 {
+                                server_tps = pn * 1000.0 / pms;
+                            }
+                        }
+                    } else if let Some(ut) = v.pointer("/usage/completion_tokens").and_then(|x| x.as_u64()) {
+                        if ut > 0 {
+                            server_tokens = ut;
+                        }
+                    }
+
                     let delta = &v["choices"][0]["delta"];
+                    let mut got_token = false;
                     if let Some(r) = delta["reasoning_content"].as_str() {
                         if !r.is_empty() {
+                            got_token = true;
                             if !in_reasoning {
                                 in_reasoning = true;
                                 full.push_str("<think>");
@@ -788,6 +907,7 @@ impl LlmManager {
                     }
                     if let Some(t) = delta["content"].as_str() {
                         if !t.is_empty() {
+                            got_token = true;
                             if in_reasoning {
                                 in_reasoning = false;
                                 full.push_str("</think>\n\n");
@@ -796,6 +916,26 @@ impl LlmManager {
                             full.push_str(t);
                             let _ = on.send(ChatEvent::Delta { text: t.to_string() });
                         }
+                    }
+                    if got_token || server_tokens > 0 {
+                        if got_token {
+                            if gen_start.is_none() {
+                                gen_start = Some(Instant::now());
+                            }
+                            chunk_tokens += 1;
+                        }
+                        let duration_ms = req_start.elapsed().as_millis() as u64;
+                        let tokens = if server_tokens > 0 { server_tokens } else { chunk_tokens };
+                        let tokens_per_sec = if server_tps > 0.0 {
+                            (server_tps * 10.0).round() / 10.0
+                        } else {
+                            let gen_secs = gen_start
+                                .map(|t| t.elapsed().as_secs_f64())
+                                .unwrap_or_else(|| req_start.elapsed().as_secs_f64())
+                                .max(0.05);
+                            ((tokens as f64 / gen_secs) * 10.0).round() / 10.0
+                        };
+                        let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
                     }
                 }
             }
@@ -809,6 +949,18 @@ impl LlmManager {
             full.push_str("</think>\n\n");
             let _ = on.send(ChatEvent::Delta { text: "</think>\n\n".to_string() });
         }
+        let duration_ms = req_start.elapsed().as_millis() as u64;
+        let tokens = if server_tokens > 0 { server_tokens } else { chunk_tokens.max(1) };
+        let tokens_per_sec = if server_tps > 0.0 {
+            (server_tps * 10.0).round() / 10.0
+        } else {
+            let gen_secs = gen_start
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or_else(|| req_start.elapsed().as_secs_f64())
+                .max(0.05);
+            ((tokens as f64 / gen_secs) * 10.0).round() / 10.0
+        };
+        let _ = on.send(ChatEvent::Stats { tokens, tokens_per_sec, duration_ms });
         Ok(full)
     }
 }

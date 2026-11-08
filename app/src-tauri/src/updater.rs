@@ -493,9 +493,18 @@ pub async fn install_update(app: &AppHandle, installer_path: String) -> Result<(
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new(&path)
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+        // 优先尝试脱离当前进程作业组独立启动安装向导，失败则回退普通 spawn
+        let spawned = std::process::Command::new(&path)
+            .creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB)
             .spawn()
-            .map_err(|e| format!("启动 Windows 安装程序失败：{e}"))?;
+            .or_else(|_| std::process::Command::new(&path).spawn());
+
+        spawned.map_err(|e| format!("启动 Windows 安装程序失败：{e}"))?;
+
         // 稍作等待确保安装向导进程已独立拉起，然后退出当前 miniBot 释放文件占用
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(450));

@@ -199,6 +199,7 @@ pub fn run() {
             commands::chat_session_delete,
             commands::chat_message_list,
             commands::chat_message_add,
+            commands::chat_message_delete_from,
             commands::list_user_agents,
             commands::save_user_agent,
             commands::delete_user_agent,

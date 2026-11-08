@@ -75,11 +75,24 @@ export type LlmError =
   | { kind: 'cancelled' }
   | { kind: 'other'; message: string };
 
-export type ChatEvent = { type: 'loading' } | { type: 'started' } | { type: 'delta'; text: string };
+export interface ChatStats {
+  tokens: number;
+  tokens_per_sec: number;
+  duration_ms: number;
+}
+
+export type ChatEvent =
+  | { type: 'loading' }
+  | { type: 'started' }
+  | { type: 'delta'; text: string }
+  | ({ type: 'stats' } & ChatStats);
+
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string | ({ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } })[];
+  reasoning_content?: string;
 }
 
 export interface Settings {
@@ -169,6 +182,7 @@ export interface ChatMessageRecord {
   role: 'user' | 'assistant' | 'system';
   content: string;
   attachments: ChatAttachment[];
+  stats?: ChatStats | null;
   ts?: number;
 }
 

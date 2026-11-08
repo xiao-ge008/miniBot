@@ -78,7 +78,7 @@ impl Default for LlmSettings {
             mmproj_path: default_mmproj.to_string_lossy().into(),
             mirror: "hf-mirror".into(),
             port: 18080,
-            ctx: 8192,
+            ctx: 32768,
             idle_secs: 180,
             required_vram_mb: 2400,
             extra_args: String::new(),
@@ -194,7 +194,7 @@ pub struct ApiSettings {
 
 impl Default for ApiSettings {
     fn default() -> Self {
-        Self { enabled: true, port: 18181, lan: false, api_key: String::new(), busy_policy: "reject".into(), thinking: false }
+        Self { enabled: true, port: 18181, lan: false, api_key: String::new(), busy_policy: "reject".into(), thinking: true }
     }
 }
 
@@ -284,8 +284,8 @@ impl SettingsStore {
         if inner.llm.mirror.trim().is_empty() {
             inner.llm.mirror = "hf-mirror".into();
         }
-        if inner.llm.ctx == 20480 || inner.llm.ctx == 0 {
-            inner.llm.ctx = 8192;
+        if inner.llm.ctx == 20480 || inner.llm.ctx == 8192 || inner.llm.ctx == 0 {
+            inner.llm.ctx = 32768;
         }
         if inner.llm.api_provider.trim().is_empty() {
             inner.llm.api_provider = "siliconflow".into();

@@ -1,29 +1,36 @@
 <script lang="ts">
-  // 极简纯粹 AI 聊天/结果视图：单一职责（不跨功能切换）+ 选中内容卡片 + 思考折叠 + 流式输出
+  // 极简纯粹 AI 聊天/结果视图：单一职责（不跨功能切换）+ 选中内容卡片 + 思考强度控制 + 流式输出
   import { onMount, tick, untrack } from 'svelte';
-  import { formatSearchContext, ipc, shouldAutoWebSearch, uid } from '$lib/core/ipc';
-  import { buildMessages, defaultOptions, type Agent } from '$lib/core/agents';
+  import { formatChatStats, ipc, uid } from '$lib/core/ipc';
+  import {
+    buildMessages,
+    buildReasoningParams,
+    defaultOptions,
+    REASONING_LEVELS,
+    type Agent,
+    type ReasoningEffort,
+  } from '$lib/core/agents';
   import { renderMarkdown } from '$lib/core/markdown';
   import { stopSpeak } from '$lib/core/tts.svelte';
   import GpuBusy from '$lib/components/GpuBusy.svelte';
   import SpeakButton from '$lib/components/SpeakButton.svelte';
-  import type { ChatMessage, GpuSnapshot, LlmError, Payload, SearchHit } from '$lib/core/types';
+  import type { ChatMessage, ChatStats, GpuSnapshot, LlmError, Payload } from '$lib/core/types';
 
   let { payload, agent: initialAgent, onbusy }: { payload: Payload; agent: Agent; onbusy: (b: boolean) => void } = $props();
 
   type Stage = 'idle' | 'ask' | 'ocr' | 'loading' | 'streaming' | 'done' | 'error' | 'gpu';
   let agent = $state<Agent>(untrack(() => initialAgent));
   let opts = $state<Record<string, string>>(untrack(() => defaultOptions(initialAgent)));
-  let enableThinking = $state<boolean>(untrack(() => !!initialAgent.thinking));
-  let enableWebSearch = $state<boolean>(untrack(() => initialAgent.id === 'qa'));
-  let searchingWeb = $state(false);
-  let searchHits = $state<SearchHit[]>([]);
+  let reasoningEffort = $state<ReasoningEffort>(
+    untrack(() => initialAgent.reasoning_effort ?? (initialAgent.thinking ? 'high' : 'off')),
+  );
   let stage = $state<Stage>('idle');
   let output = $state('');
   let errorMsg = $state('');
   let gpu = $state<{ snapshot: GpuSnapshot; required: number } | null>(null);
   let convo: ChatMessage[] = [];
-  let done = $state<{ q: string; a: string }[]>([]);
+  let done = $state<{ q: string; a: string; stats?: ChatStats | null; convoSnap: ChatMessage[] }[]>([]);
+  let currentStats = $state<ChatStats | null>(null);
   let curQ = $state('');
   let question = $state('');
   let inputText = $state(untrack(() => payload.text ?? ''));
@@ -90,7 +97,8 @@
   }
 
   async function start(force = false) {
-    if (agent.chat && !isLauncher && !question.trim()) {
+    const qText = question.trim() || curQ;
+    if (agent.chat && !isLauncher && !qText) {
       stage = 'ask';
       output = '';
       done = [];
@@ -101,12 +109,14 @@
     const input = await prepareText();
     if (!input) return;
     done = [];
-    curQ = agent.chat && !isLauncher ? question.trim() : '';
+    curQ = agent.chat && !isLauncher ? qText : '';
     if (agent.chat && isLauncher) {
-      convo = [
-        { role: 'system', content: agent.system },
-        { role: 'user', content: input.text },
-      ];
+      convo = agent.system?.trim()
+        ? [
+            { role: 'system', content: agent.system.trim() },
+            { role: 'user', content: input.text },
+          ]
+        : [{ role: 'user', content: input.text }];
     } else {
       convo = buildMessages(agent, payload, { ...input, question: curQ, opts });
     }
@@ -114,61 +124,43 @@
     await stream(force);
   }
 
-  async function stream(force = false) {
+  /**
+   * 重新生成当前最后一轮 AI 回复：
+   * 清空当前已生成的内容（当前轮次尚未推入 convo，因此 convo 上下文天然不包含本次旧回复），
+   * 并传入 regenerate=true（cache_prompt: false）彻底避免旧回复污染上下文与 KV 缓存。
+   */
+  async function regenerateCurrent() {
+    if (busy || stage === 'ask' || convo.length === 0) return;
+    stopSpeak();
+    await stream(false, true);
+  }
+
+  /**
+   * 重新生成历史第 index 轮 AI 回复：
+   * 删除该轮及之后的所有问答历史，将 convo 回滚至该轮提问时的干净快照，避免旧回复污染上下文。
+   */
+  async function regenerateTurn(index: number) {
+    if (busy) return;
+    const target = done[index];
+    if (!target) return;
+    stopSpeak();
+    convo = target.convoSnap.map((m) => ({ ...m }));
+    curQ = target.q;
+    done = done.slice(0, index);
+    await tick();
+    await stream(false, true);
+  }
+
+  async function stream(force = false, regenerate = false) {
     output = '';
     errorMsg = '';
     gpu = null;
     thinkOpen = false;
-    searchHits = [];
+    currentStats = null;
     stage = 'loading';
     reqId = uid('c');
 
-    // 构建实际发送给模型的会话副本（支持注入实时联网搜索上下文）
     const activeConvo: ChatMessage[] = convo.map((m) => ({ ...m }));
-    const queryBase = (curQ || inputText || '').trim();
-    const shouldSearch =
-      queryBase.length > 0 &&
-      (enableWebSearch || (curQ && shouldAutoWebSearch(curQ))) &&
-      (curQ.length > 0 || agent.id === 'qa' || enableWebSearch);
-
-    if (shouldSearch) {
-      let searchQuery = curQ.trim();
-      if (/你能联网|可以联网|能搜索吗|会联网吗/.test(searchQuery)) {
-        searchQuery = '今日最新科技热点资讯';
-      } else if (!searchQuery || searchQuery.length < 6 || /这段|核心|意思|要点|分析|解释|什么/.test(searchQuery)) {
-        const snippet = inputText.replace(/\s+/g, ' ').trim().slice(0, 90);
-        searchQuery = [searchQuery, snippet].filter(Boolean).join(' ');
-      }
-      if (searchQuery) {
-        searchingWeb = true;
-        try {
-          const sres = await ipc.webSearch(searchQuery, 5);
-          if (sres && sres.hits && sres.hits.length > 0) {
-            searchHits = sres.hits;
-            const ctxBlock = formatSearchContext(sres);
-            if (activeConvo.length > 0 && activeConvo[0].role === 'system' && typeof activeConvo[0].content === 'string') {
-              activeConvo[0] = {
-                role: 'system',
-                content:
-                  activeConvo[0].content +
-                  '\n你已接入实时免费联网搜索引擎，当用户消息附带【实时联网搜索结果】时，请结合检索到的最新网页事实准确回答，切勿声称自己无法联网。',
-              };
-            }
-            const lastIdx = activeConvo.length - 1;
-            if (lastIdx >= 0 && activeConvo[lastIdx].role === 'user' && typeof activeConvo[lastIdx].content === 'string') {
-              activeConvo[lastIdx] = {
-                ...activeConvo[lastIdx],
-                content: `${activeConvo[lastIdx].content}${ctxBlock}`,
-              };
-            }
-          }
-        } catch {
-          // 联网检索失败时静默降级为本地推理
-        } finally {
-          searchingWeb = false;
-        }
-      }
-    }
 
     try {
       const full = await ipc.llmChat(
@@ -180,13 +172,24 @@
             output += e.text;
             scrollDown();
           }
+          if (e.type === 'stats') {
+            currentStats = {
+              tokens: e.tokens,
+              tokens_per_sec: e.tokens_per_sec,
+              duration_ms: e.duration_ms,
+            };
+          }
         },
         {
           force,
           params: {
-            temperature: agent.temperature ?? 0.3,
-            max_tokens: agent.max_tokens ?? 2048,
-            chat_template_kwargs: { enable_thinking: enableThinking },
+            temperature: agent.temperature ?? 0.7,
+            top_p: 0.95,
+            top_k: 40,
+            min_p: 0.05,
+            max_tokens: agent.max_tokens ?? -1,
+            cache_prompt: !regenerate,
+            ...buildReasoningParams(reasoningEffort),
           },
         },
       );
@@ -239,8 +242,23 @@
       await start();
       return;
     }
-    done = [...done, { q: curQ, a: output }];
-    convo = [...convo, { role: 'assistant', content: cleanOutput }, { role: 'user', content: q }];
+    done = [
+      ...done,
+      {
+        q: curQ,
+        a: output,
+        stats: currentStats ? { ...currentStats } : null,
+        convoSnap: convo.map((m) => ({ ...m })),
+      },
+    ];
+    const prevAssistant: ChatMessage = {
+      role: 'assistant',
+      content: cleanOutput,
+    };
+    if (currentParsed.think) {
+      prevAssistant.reasoning_content = currentParsed.think;
+    }
+    convo = [...convo, prevAssistant, { role: 'user', content: q }];
     curQ = q;
     question = '';
     await stream();
@@ -250,14 +268,8 @@
     if (reqId) ipc.llmCancel(reqId);
   }
 
-  function toggleThinking() {
-    enableThinking = !enableThinking;
-    if (stage === 'done') start();
-  }
-
-  function toggleWebSearch() {
-    enableWebSearch = !enableWebSearch;
-    if (stage === 'done') start();
+  function onReasoningChange() {
+    if (stage === 'done') regenerateCurrent();
   }
 
   onMount(() => {
@@ -291,24 +303,18 @@
             {#each o.choices as c (c)}<option value={c}>{c}</option>{/each}
           </select>
         {/each}
-        <button
-          class="think-toggle"
-          class:on={enableThinking}
-          onclick={toggleThinking}
+        <select
+          class="opt-sel think-sel"
+          class:on={reasoningEffort !== 'off'}
+          bind:value={reasoningEffort}
+          onchange={onReasoningChange}
           disabled={busy}
-          title={enableThinking ? '思考模式已开启（展示折叠思考过程）' : '点击开启深度思考'}
+          title="调节思考强度（对齐 llama.cpp 聊天框）"
         >
-          思考
-        </button>
-        <button
-          class="think-toggle"
-          class:on={enableWebSearch}
-          onclick={toggleWebSearch}
-          disabled={busy}
-          title={enableWebSearch ? '联网搜索已开启（免费检索实时互联网信息）' : '点击开启免费联网搜索'}
-        >
-          🌐 联网
-        </button>
+          {#each REASONING_LEVELS as lv (lv.value)}
+            <option value={lv.value}>💭 思考：{lv.shortLabel}</option>
+          {/each}
+        </select>
       </div>
 
       {#if payload.image}
@@ -355,6 +361,17 @@
           <div class="md out">{@html renderMarkdown(p.answer)}</div>
           <div class="turn-tools">
             <SpeakButton id={`turn-${i}`} text={p.answer} label="朗读" title="朗读此条 AI 回复" />
+            <button
+              class="turn-regen"
+              onclick={() => regenerateTurn(i)}
+              disabled={busy}
+              title="删除此轮及后续问答上下文并重新生成"
+            >
+              重新生成
+            </button>
+            {#if t.stats && formatChatStats(t.stats)}
+              <span class="turn-stats">⚡ {formatChatStats(t.stats)}</span>
+            {/if}
           </div>
         {/if}
       </div>
@@ -374,7 +391,7 @@
     {:else if stage === 'loading'}
       <div class="skeleton-wrap">
         <div class="hint">
-          <span class="pulse-dot"></span>{searchingWeb ? '🌐 正在搜索网络实时信息…' : '正在思考与生成…'}
+          <span class="pulse-dot"></span>正在思考与生成…
         </div>
       </div>
     {:else if stage === 'gpu' && gpu}
@@ -387,23 +404,6 @@
       />
     {:else if stage === 'error'}
       <div class="err">{errorMsg}</div>
-    {/if}
-
-    {#if searchHits.length > 0 && stage !== 'ask'}
-      <details class="search-sources">
-        <summary class="search-sum">
-          <span>🌐 已检索 {searchHits.length} 条网页来源</span>
-        </summary>
-        <div class="search-list">
-          {#each searchHits as hit, hi (hi)}
-            <a class="search-item" href={hit.url} target="_blank" rel="noopener noreferrer" title={hit.url}>
-              <span class="search-idx">[{hi + 1}]</span>
-              <span class="search-title">{hit.title}</span>
-              <span class="search-engine">{hit.source}</span>
-            </a>
-          {/each}
-        </div>
-      </details>
     {/if}
 
     {#if output && stage !== 'ask'}
@@ -432,24 +432,38 @@
           {@html renderMarkdown(currentParsed.answer)}{#if stage === 'streaming' && !currentParsed.thinking}<span class="caret">▍</span>{/if}
         </div>
       {/if}
+
+      {#if currentStats && formatChatStats(currentStats)}
+        <div class="turn-stats-row">
+          <span class="turn-stats" class:live={stage === 'streaming'}>⚡ {formatChatStats(currentStats)}</span>
+        </div>
+      {/if}
     {/if}
   </div>
 
   <!-- 底部输入与操作融合栏 -->
   <div class="bottom-bar">
-    {#if busy || (cleanOutput && stage === 'done')}
+    {#if busy || (cleanOutput && stage === 'done') || stage === 'error'}
       <div class="actions">
         {#if busy}
           <button class="act-btn" onclick={cancel}>停止</button>
         {:else}
-          <SpeakButton id="chat-out" text={cleanOutput} label="朗读" variant="pill" title="使用 Edge TTS 朗读 AI 回复" />
-          <button class="act-btn" class:copied onclick={doCopy}>
-            {copied ? '已复制' : '复制'}
-          </button>
-          {#if canReplace}
-            <button class="act-btn primary" onclick={() => ipc.replaceText(payload.source_hwnd, cleanOutput)} title="Ctrl+Enter">替换原文</button>
+          {#if cleanOutput}
+            <SpeakButton id="chat-out" text={cleanOutput} label="朗读" variant="pill" title="使用 Edge TTS 朗读 AI 回复" />
+            <button class="act-btn" class:copied onclick={doCopy}>
+              {copied ? '已复制' : '复制'}
+            </button>
+            {#if canReplace}
+              <button class="act-btn primary" onclick={() => ipc.replaceText(payload.source_hwnd, cleanOutput)} title="Ctrl+Enter">替换原文</button>
+            {/if}
           {/if}
-          <button class="act-btn ghost" onclick={() => start()} title="重新生成">重试</button>
+          <button
+            class="act-btn ghost"
+            onclick={regenerateCurrent}
+            title="删除当前回复并重新生成，避免旧回复污染上下文"
+          >
+            重新生成
+          </button>
         {/if}
       </div>
     {/if}
@@ -543,16 +557,7 @@
     height: 22px;
     background: var(--panel-elevated);
   }
-  .think-toggle {
-    padding: 0 7px;
-    height: 22px;
-    font-size: 11.5px;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--fg-dim);
-    border: 1px solid var(--border);
-  }
-  .think-toggle.on {
+  .think-sel.on {
     color: var(--accent-blue);
     border-color: color-mix(in srgb, var(--accent-blue) 45%, transparent);
     background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
@@ -620,7 +625,37 @@
   .turn-tools {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .turn-regen {
+    padding: 1px 7px;
+    font-size: 11px;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg-dim);
+    border: 1px solid var(--border);
+  }
+  .turn-regen:hover:not(:disabled) {
+    color: var(--fg);
+    border-color: var(--fg-dim);
+    background: var(--hover);
+  }
+  .turn-stats-row {
+    display: flex;
+    align-items: center;
+    padding-top: 2px;
+  }
+  .turn-stats {
+    font-size: 11px;
+    color: var(--fg-dim);
+    opacity: 0.78;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+  .turn-stats.live {
+    color: var(--accent-blue);
+    opacity: 0.92;
   }
   .q-row {
     display: flex;
@@ -637,61 +672,6 @@
     max-width: 85%;
     white-space: pre-wrap;
     word-break: break-word;
-  }
-
-  /* 联网搜索来源面板 */
-  .search-sources {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 9px;
-    font-size: 11.5px;
-    flex-shrink: 0;
-  }
-  .search-sum {
-    cursor: pointer;
-    color: var(--accent-blue);
-    font-weight: 500;
-    user-select: none;
-  }
-  .search-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin-top: 5px;
-  }
-  .search-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    text-align: left;
-    padding: 3px 6px;
-    border-radius: 4px;
-    border: none;
-    background: transparent;
-    color: var(--fg);
-    font-size: 11.5px;
-    cursor: pointer;
-    text-decoration: none;
-  }
-  .search-item:hover {
-    background: var(--hover);
-  }
-  .search-idx {
-    color: var(--accent-blue);
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-  .search-title {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .search-engine {
-    color: var(--fg-dim);
-    font-size: 10.5px;
-    flex-shrink: 0;
   }
 
   /* 可折叠思考面板 */

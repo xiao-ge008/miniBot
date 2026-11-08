@@ -104,6 +104,7 @@ impl ClipWatcher {
     }
 
     pub fn spawn(app: AppHandle) {
+        #[cfg(windows)]
         Self::spawn_mouse_selection(app.clone());
         std::thread::spawn(move || {
             let mut last_seq = crate::winutil::clipboard_seq();
@@ -168,7 +169,8 @@ impl ClipWatcher {
         });
     }
 
-    /// 千问桌面端同款「鼠标划词即出 Tip」+「点击外部自动收起 Tip」
+    /// 千问桌面端同款「鼠标划词即出 Tip」+「点击外部自动收起 Tip」（仅 Windows 原生 Win32 下启用，避免 macOS 后台线程轮询 WindowServer/NSWindow 引发死锁）
+    #[cfg(windows)]
     fn spawn_mouse_selection(app: AppHandle) {
         std::thread::spawn(move || {
             let mut was_down = false;

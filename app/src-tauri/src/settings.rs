@@ -32,10 +32,19 @@ pub struct ModelParams {
     pub ngl: i32,
     /// KV Cache 量化类型："q8_0"（默认） | "f16" | "q4_0"
     pub kv_quant: String,
+    /// 默认思考等级："off"（默认） | "low" | "medium" | "high" | "max"
+    pub reasoning_effort: String,
     /// 闲置多少秒后自动释放显存（默认 180 秒）
     pub idle_secs: u64,
     /// 额外启动参数（如 --threads 8）
     pub extra_args: String,
+}
+
+pub fn normalize_reasoning_effort(v: &str) -> String {
+    match v.trim().to_lowercase().as_str() {
+        "off" | "low" | "medium" | "high" | "max" => v.trim().to_lowercase(),
+        _ => "off".into(),
+    }
 }
 
 impl Default for ModelParams {
@@ -44,6 +53,7 @@ impl Default for ModelParams {
             ctx: 32768,
             ngl: 99,
             kv_quant: "q8_0".into(),
+            reasoning_effort: "off".into(),
             idle_secs: 180,
             extra_args: String::new(),
         }
@@ -99,6 +109,8 @@ pub struct LlmSettings {
     pub ngl: i32,
     /// KV Cache 量化精度（默认 q8_0）
     pub kv_quant: String,
+    /// 当前激活模型的默认思考等级："off" | "low" | "medium" | "high" | "max"
+    pub reasoning_effort: String,
     /// 闲置多少秒后释放模型
     pub idle_secs: u64,
     /// 预估所需显存（MB），低于该值触发让道检查
@@ -156,6 +168,7 @@ impl Default for LlmSettings {
             ctx: 32768,
             ngl: 99,
             kv_quant: "q8_0".into(),
+            reasoning_effort: "off".into(),
             idle_secs: 180,
             required_vram_mb: 2400,
             extra_args: String::new(),
@@ -382,6 +395,7 @@ impl SettingsStore {
         if inner.llm.kv_quant.trim().is_empty() {
             inner.llm.kv_quant = "q8_0".into();
         }
+        inner.llm.reasoning_effort = normalize_reasoning_effort(&inner.llm.reasoning_effort);
         if inner.llm.ngl < 0 {
             inner.llm.ngl = 99;
         }

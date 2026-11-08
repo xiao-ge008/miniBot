@@ -20,6 +20,17 @@ export const REASONING_LEVELS: ReasoningLevelOption[] = [
   { value: 'max', label: '满血无限制 (Max)', shortLabel: '满', budgetTokens: -1 },
 ];
 
+/** 规范化思考强度枚举值 */
+export function normalizeReasoningEffort(
+  v?: string | null,
+  fallback: ReasoningEffort = 'off',
+): ReasoningEffort {
+  if (v === 'off' || v === 'low' || v === 'medium' || v === 'high' || v === 'max') {
+    return v;
+  }
+  return fallback;
+}
+
 /** 构建对齐 llama.cpp /v1/chat/completions 的思考控制参数 */
 export function buildReasoningParams(effort: ReasoningEffort): Record<string, unknown> {
   const enableThinking = effort !== 'off';
@@ -116,7 +127,6 @@ export const BUILTIN_AGENTS: Agent[] = [
     order: 20,
     vision: true,
     thinking: true,
-    reasoning_effort: 'high',
     temperature: 0.6,
     max_tokens: -1,
     system: '请用通俗中文先一句话概括核心含义，再分点说明关键细节或解决方案。',
@@ -159,7 +169,6 @@ export const BUILTIN_AGENTS: Agent[] = [
     chat: true,
     vision: true,
     thinking: true,
-    reasoning_effort: 'high',
     temperature: 0.7,
     max_tokens: -1,
     system: '',

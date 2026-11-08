@@ -60,6 +60,7 @@ export interface StatusInfo {
   reason: string;
   api_enabled: boolean;
   api_model: string;
+  reasoning_effort?: ReasoningEffort;
 }
 
 export interface CloudTestResult {
@@ -99,6 +100,7 @@ export interface ModelParams {
   ctx: number;
   ngl: number;
   kv_quant: string;
+  reasoning_effort: ReasoningEffort;
   idle_secs: number;
   extra_args: string;
 }
@@ -155,6 +157,7 @@ export interface Settings {
     ctx: number;
     ngl?: number;
     kv_quant?: string;
+    reasoning_effort?: ReasoningEffort;
     idle_secs: number;
     required_vram_mb: number;
     extra_args: string;

@@ -18,6 +18,11 @@ pub fn start(app: &AppHandle, mode: &str) {
     let mode = mode.to_string();
     std::thread::spawn(move || {
         let st = app.state::<crate::AppState>();
+        #[cfg(target_os = "macos")]
+        if st.capture_png.lock().unwrap().is_some() {
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
         if app.get_webview_window("capture").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false) {
             return;
         }
@@ -50,32 +55,41 @@ pub fn start(app: &AppHandle, mode: &str) {
         p.kind = PayloadKind::Image;
         p.meta = serde_json::json!({ "mode": mode, "frame": frame, "windows": windows, "t": crate::payload::new_id() });
 
-        let Some(w) = crate::wins::get_or_build(&app, "capture") else {
-            crate::log_msg(&app, "[capture] get_or_build capture 失败");
-            return;
-        };
         #[cfg(target_os = "macos")]
         {
-            let s = frame.scale.max(1.0) as f64;
-            let _ = w.set_position(tauri::LogicalPosition::new(frame.x as f64, frame.y as f64));
-            let _ = w.set_size(tauri::LogicalSize::new(frame.width as f64 / s, frame.height as f64 / s));
+            let app_main = app.clone();
+            let frame_c = frame.clone();
+            let mode_c = mode.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(w) = crate::wins::get_or_build(&app_main, "capture") else {
+                    crate::log_msg(&app_main, "[capture] get_or_build capture 失败");
+                    return;
+                };
+                let s = frame_c.scale.max(1.0) as f64;
+                let _ = w.set_position(tauri::LogicalPosition::new(frame_c.x as f64, frame_c.y as f64));
+                let _ = w.set_size(tauri::LogicalSize::new(frame_c.width as f64 / s, frame_c.height as f64 / s));
+                crate::wins::deliver(&app_main, "capture", p);
+                crate::log_msg(&app_main, format!("[capture] 已投递截图帧 {}x{} mode={mode_c}", frame_c.width, frame_c.height));
+            });
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let Some(w) = crate::wins::get_or_build(&app, "capture") else {
+                crate::log_msg(&app, "[capture] get_or_build capture 失败");
+                return;
+            };
             let _ = w.set_position(tauri::PhysicalPosition::new(frame.x, frame.y));
             let _ = w.set_size(tauri::PhysicalSize::new(frame.width, frame.height));
+            crate::wins::deliver(&app, "capture", p);
+            crate::log_msg(&app, format!("[capture] 已投递截图帧 {}x{} mode={mode}", frame.width, frame.height));
         }
-        crate::wins::deliver(&app, "capture", p);
-        crate::log_msg(&app, format!("[capture] 已投递截图帧 {}x{} mode={mode}", frame.width, frame.height));
 
         // 兜底显示：前端解码完会立即调 capture_ready；若隐藏窗口在极个别环境下延迟响应，100ms 后强制显示避免无反应
         let app_show = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if let Some(w) = app_show.get_webview_window("capture") {
-                if !w.is_visible().unwrap_or(false) && app_show.state::<crate::AppState>().capture_png.lock().unwrap().is_some() {
-                    ready(&app_show);
-                }
+            if app_show.state::<crate::AppState>().capture_png.lock().unwrap().is_some() {
+                ready(&app_show);
             }
         });
 
@@ -92,42 +106,58 @@ pub fn start(app: &AppHandle, mode: &str) {
 
 /// 可见窗口矩形（相对当前显示器的物理像素，按 Z 序从上到下），用于「单击选窗口」
 fn window_rects(f: &Frame) -> Vec<[i32; 4]> {
-    let Ok(list) = xcap::Window::all() else { return vec![] };
-    let mut out = vec![];
+    // macOS 下跳过全量窗口枚举（避免高频调用 CGWindowListCopyWindowInfo 阻塞 WindowServer）
     #[cfg(target_os = "macos")]
-    let scale = f.scale.max(1.0);
-    #[cfg(not(target_os = "macos"))]
-    let scale = 1.0f32;
-
-    for w in list {
-        if w.is_minimized().unwrap_or(true) {
-            continue;
-        }
-        let title = w.title().unwrap_or_default();
-        if title.is_empty() || title.starts_with("miniBot") {
-            continue;
-        }
-        let (Ok(x), Ok(y), Ok(ww), Ok(hh)) = (w.x(), w.y(), w.width(), w.height()) else { continue };
-        if ww < 40 || hh < 40 {
-            continue;
-        }
-        let rx0 = (((x - f.x) as f32) * scale).round() as i32;
-        let ry0 = (((y - f.y) as f32) * scale).round() as i32;
-        let rw = ((ww as f32) * scale).round() as i32;
-        let rh = ((hh as f32) * scale).round() as i32;
-        let x0 = rx0.max(0);
-        let y0 = ry0.max(0);
-        let x1 = (rx0 + rw).min(f.width as i32);
-        let y1 = (ry0 + rh).min(f.height as i32);
-        if x1 - x0 < 40 || y1 - y0 < 40 {
-            continue;
-        }
-        out.push([x0, y0, x1 - x0, y1 - y0]);
+    {
+        let _ = f;
+        return vec![];
     }
-    out
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(list) = xcap::Window::all() else { return vec![] };
+        let mut out = vec![];
+        for w in list {
+            if w.is_minimized().unwrap_or(true) {
+                continue;
+            }
+            let title = w.title().unwrap_or_default();
+            if title.is_empty() || title.starts_with("miniBot") {
+                continue;
+            }
+            let (Ok(x), Ok(y), Ok(ww), Ok(hh)) = (w.x(), w.y(), w.width(), w.height()) else { continue };
+            if ww < 40 || hh < 40 {
+                continue;
+            }
+            let rx0 = x - f.x;
+            let ry0 = y - f.y;
+            let rw = ww as i32;
+            let rh = hh as i32;
+            let x0 = rx0.max(0);
+            let y0 = ry0.max(0);
+            let x1 = (rx0 + rw).min(f.width as i32);
+            let y1 = (ry0 + rh).min(f.height as i32);
+            if x1 - x0 < 40 || y1 - y0 < 40 {
+                continue;
+            }
+            out.push([x0, y0, x1 - x0, y1 - y0]);
+        }
+        out
+    }
 }
 
 pub fn ready(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = app2.get_webview_window("capture") {
+                let _ = w.show();
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_focus();
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(w) = app.get_webview_window("capture") {
         let _ = w.show();
         let _ = w.set_always_on_top(true);
@@ -137,8 +167,18 @@ pub fn ready(app: &AppHandle) {
 }
 
 pub fn close(app: &AppHandle) {
+    *app.state::<crate::AppState>().capture_png.lock().unwrap() = None;
+    #[cfg(target_os = "macos")]
+    {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = app2.get_webview_window("capture") {
+                let _ = w.hide();
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(w) = app.get_webview_window("capture") {
         let _ = w.hide();
     }
-    *app.state::<crate::AppState>().capture_png.lock().unwrap() = None;
 }

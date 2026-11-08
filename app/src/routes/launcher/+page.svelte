@@ -12,11 +12,15 @@
     ipc,
     onChatCapture,
     onLlmStatus,
-    onOutsideClick,
     onPayload,
     uid,
   } from '$lib/core/ipc';
-  import { buildReasoningParams, REASONING_LEVELS, type ReasoningEffort } from '$lib/core/agents';
+  import {
+    buildReasoningParams,
+    normalizeReasoningEffort,
+    REASONING_LEVELS,
+    type ReasoningEffort,
+  } from '$lib/core/agents';
   import { renderMarkdown } from '$lib/core/markdown';
   import { stopSpeak, tts } from '$lib/core/tts.svelte';
   import GpuBusy from '$lib/components/GpuBusy.svelte';
@@ -42,27 +46,24 @@
   let currentSessionId = $state<string>('');
   let messages = $state<ChatMessageRecord[]>([]);
 
-  // 输入与附件状态（对齐 llama.cpp WebUI：默认开启高思考强度，联网默认关闭）
+  // 输入与附件状态（默认思考等级跟随当前模型在模型设置中的配置，也可在聊天框随时切换）
   let inputText = $state('');
   let pendingAttachments = $state<ChatAttachment[]>([]);
   let parsingMedia = $state(false);
   let dragOver = $state(false);
-  let reasoningEffort = $state<ReasoningEffort>('high');
+  let modelDefaultEffort = $state<ReasoningEffort>('off');
+  let reasoningEffort = $state<ReasoningEffort>('off');
   let enableWebSearch = $state(false);
   let searchingWeb = $state(false);
   let lastSearchHits = $state<SearchHit[]>([]);
 
   function setReasoningEffort(level: ReasoningEffort) {
     reasoningEffort = level;
-    try {
-      localStorage.setItem('minibot.reasoning_effort', level);
-    } catch {
-      /* ignore */
-    }
   }
 
   function toggleReasoningQuick() {
-    setReasoningEffort(reasoningEffort === 'off' ? 'high' : 'off');
+    const targetOn = modelDefaultEffort !== 'off' ? modelDefaultEffort : 'medium';
+    setReasoningEffort(reasoningEffort === 'off' ? targetOn : 'off');
   }
 
   // 流式推理状态
@@ -788,23 +789,26 @@
     return `${d.getMonth() + 1}/${d.getDate()}`;
   }
 
+  async function syncModelReasoningEffort() {
+    try {
+      const cfg = await ipc.getSettings();
+      const eff = normalizeReasoningEffort(cfg.llm.reasoning_effort, 'off');
+      modelDefaultEffort = eff;
+      reasoningEffort = eff;
+    } catch {
+      /* ignore */
+    }
+  }
+
   onMount(() => {
     openedAt = Date.now();
-    try {
-      const saved = localStorage.getItem('minibot.reasoning_effort') as ReasoningEffort | null;
-      if (saved && ['off', 'low', 'medium', 'high', 'max'].includes(saved)) {
-        reasoningEffort = saved;
-      } else {
-        reasoningEffort = 'high';
-      }
-    } catch {
-      reasoningEffort = 'high';
-    }
+    syncModelReasoningEffort();
     loadSessions(true);
     checkUpdateSilent(true);
     const unP = onPayload(() => {
       openedAt = Date.now();
       win.setAlwaysOnTop(pinned).catch(() => {});
+      syncModelReasoningEffort();
       loadSessions(false);
       checkUpdateSilent(false);
       textareaEl?.focus();
@@ -812,37 +816,26 @@
     const unC = onChatCapture((data) => {
       openedAt = Date.now();
       win.setAlwaysOnTop(pinned).catch(() => {});
+      syncModelReasoningEffort();
       handleCaptureToChat(data);
     });
-    const unS = onLlmStatus((s) => (status = s));
-    // 鼠标在窗口外部空白处点击时，若未开启置顶（!pinned），立即隐藏聊天窗
-    const unO = onOutsideClick(() => {
-      if (!pinned && !pickingFile && Date.now() - openedAt > 200) {
-        ipc.hideSelf();
+    const unS = onLlmStatus((s) => {
+      status = s;
+      if (s.reasoning_effort) {
+        const eff = normalizeReasoningEffort(s.reasoning_effort, 'off');
+        if (eff !== modelDefaultEffort || s.reason === '切换模型' || s.reason === '模型参数已更新') {
+          modelDefaultEffort = eff;
+          reasoningEffort = eff;
+        }
       }
     });
-    // 失去焦点自动隐藏（未设置置顶 !pinned 时）
+    // AI 聊天主窗口在切换其他应用窗口时保持可见，不再因失焦或外部点击自动隐藏（仅通过右上角 ✕ / 最小化 / Esc 关闭）
     const unF = win.onFocusChanged(({ payload: focused }) => {
       if (focused) {
         openedAt = Date.now();
         setTimeout(() => {
           pickingFile = false;
         }, 250);
-        return;
-      }
-      if (!pinned && !pickingFile && Date.now() - openedAt > 250) {
-        setTimeout(async () => {
-          try {
-            const stillFocused = await win.isFocused();
-            if (!stillFocused && !pinned && !pickingFile) {
-              ipc.hideSelf();
-            }
-          } catch {
-            if (!pinned && !pickingFile) {
-              ipc.hideSelf();
-            }
-          }
-        }, 120);
       }
     });
     ipc.llmStatus().then((s) => (status = s));
@@ -850,7 +843,6 @@
       unP.then((f) => f());
       unC.then((f) => f());
       unS.then((f) => f());
-      unO.then((f) => f());
       unF.then((f) => f());
     };
   });
@@ -982,7 +974,7 @@
           class="win-btn"
           class:active={pinned}
           onclick={togglePin}
-          title={pinned ? '已固定置顶（点击取消置顶）' : '固定窗口（失焦不自动收起）'}
+          title={pinned ? '已开启窗口置顶（点击取消置顶）' : '窗口置顶（始终悬浮在其他窗口最上方）'}
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none">
             <line x1="12" y1="17" x2="12" y2="22" />

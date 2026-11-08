@@ -364,6 +364,18 @@ mod imp {
         fn objc_getClass(name: *const c_char) -> *mut c_void;
         fn sel_registerName(name: *const c_char) -> *mut c_void;
         fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    /// 在非主线程调用 Objective-C / AppKit 方法时必须包裹 AutoreleasePool，防止临时对象泄漏导致内存暴涨或崩溃
+    fn with_autorelease_pool<T, F: FnOnce() -> T>(f: F) -> T {
+        unsafe {
+            let pool = objc_autoreleasePoolPush();
+            let res = f();
+            objc_autoreleasePoolPop(pool);
+            res
+        }
     }
 
     unsafe fn msg_send_id(receiver: *mut c_void, sel: *mut c_void) -> *mut c_void {
@@ -424,18 +436,18 @@ mod imp {
 
     /// 在 macOS 上返回当前最前端应用 PID（作为跨线程标识句柄，供后续 focus_hwnd 切回焦点）
     pub fn foreground_hwnd() -> isize {
-        unsafe {
+        with_autorelease_pool(|| unsafe {
             let app = frontmost_app();
             if app.is_null() {
                 return 0;
             }
             msg_send_i32(app, sel_registerName(c"processIdentifier".as_ptr())) as isize
-        }
+        })
     }
 
     /// 获取当前 macOS 前台应用名称（如 "Safari"、"Google Chrome"、"miniBot"）
     pub fn foreground_process() -> Option<String> {
-        unsafe {
+        with_autorelease_pool(|| unsafe {
             let app = frontmost_app();
             if app.is_null() {
                 return None;
@@ -455,7 +467,7 @@ mod imp {
                 return process_name(pid as u32);
             }
             None
-        }
+        })
     }
 
     /// 激活指定 PID 对应的 macOS 应用窗口（用于「替换原文」切回来源应用粘贴）
@@ -463,7 +475,7 @@ mod imp {
         if hwnd <= 0 {
             return;
         }
-        unsafe {
+        with_autorelease_pool(|| unsafe {
             let cls = objc_getClass(c"NSRunningApplication".as_ptr());
             let sel_find = sel_registerName(c"runningApplicationWithProcessIdentifier:".as_ptr());
             if cls.is_null() || sel_find.is_null() {
@@ -480,12 +492,12 @@ mod imp {
                 std::mem::transmute(objc_msgSend as *const ());
             // NSApplicationActivateIgnoringOtherApps = 1 << 1 (2)
             let _ = act_fn(app, sel_act, 2);
-        }
+        });
     }
 
     /// 获取当前鼠标全局屏幕坐标（以主屏幕左上角为 (0,0) 的逻辑点坐标）
     pub fn cursor_pos() -> (i32, i32) {
-        unsafe {
+        with_autorelease_pool(|| unsafe {
             let ev = CGEventCreate(std::ptr::null());
             if ev.is_null() {
                 return (320, 240);
@@ -493,7 +505,7 @@ mod imp {
             let pt = CGEventGetLocation(ev);
             CFRelease(ev);
             (pt.x.round() as i32, pt.y.round() as i32)
-        }
+        })
     }
 
     pub fn is_cursor_ibeam() -> bool {
@@ -517,25 +529,42 @@ mod imp {
 
     /// 读取 macOS 系统剪贴板变更序号（NSPasteboard.generalPasteboard.changeCount）
     pub fn clipboard_seq() -> u32 {
-        unsafe {
+        with_autorelease_pool(|| unsafe {
             let cls = objc_getClass(c"NSPasteboard".as_ptr());
             let pb = msg_send_id(cls, sel_registerName(c"generalPasteboard".as_ptr()));
             msg_send_isize(pb, sel_registerName(c"changeCount".as_ptr())) as u32
-        }
+        })
     }
 
     pub fn send_ctrl(letter: char) {
         let ch = letter.to_ascii_lowercase();
-        let script = format!(
-            "tell application \"System Events\" to keystroke \"{ch}\" using command down"
-        );
+        // 参考 eSearch darwin 实现：使用物理虚拟键码（c=8, v=9）并延迟 0.08s 避开快捷键修饰键冲突与中文输入法干扰
+        let key_cmd = match ch {
+            'c' => "key code 8 using command down".to_string(),
+            'v' => "key code 9 using command down".to_string(),
+            _ => format!("keystroke \"{ch}\" using command down"),
+        };
         let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
+            .args([
+                "-e",
+                "tell application \"System Events\"",
+                "-e",
+                "delay 0.08",
+                "-e",
+                &key_cmd,
+                "-e",
+                "end tell",
+            ])
             .output();
     }
 
     pub fn send_ctrl_c_clean() {
-        send_ctrl('c');
+        let _ = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to key code 8 using command down",
+            ])
+            .output();
     }
 
     pub fn make_noactivate(_hwnd: isize) {}

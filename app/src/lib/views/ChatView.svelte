@@ -1,11 +1,12 @@
 <script lang="ts">
   // 极简纯粹 AI 聊天/结果视图：单一职责（不跨功能切换）+ 选中内容卡片 + 思考强度控制 + 流式输出
   import { onMount, tick, untrack } from 'svelte';
-  import { formatChatStats, ipc, uid } from '$lib/core/ipc';
+  import { formatChatStats, ipc, onLlmStatus, uid } from '$lib/core/ipc';
   import {
     buildMessages,
     buildReasoningParams,
     defaultOptions,
+    normalizeReasoningEffort,
     REASONING_LEVELS,
     type Agent,
     type ReasoningEffort,
@@ -22,8 +23,10 @@
   let agent = $state<Agent>(untrack(() => initialAgent));
   let opts = $state<Record<string, string>>(untrack(() => defaultOptions(initialAgent)));
   let reasoningEffort = $state<ReasoningEffort>(
-    untrack(() => initialAgent.reasoning_effort ?? (initialAgent.thinking ? 'high' : 'off')),
+    untrack(() => initialAgent.reasoning_effort ?? 'off'),
   );
+  let userChangedReasoning = false;
+  let effortSynced = false;
   let stage = $state<Stage>('idle');
   let output = $state('');
   let errorMsg = $state('');
@@ -142,7 +145,21 @@
     return { text, image };
   }
 
+  async function ensureModelDefaultEffort() {
+    if (effortSynced) return;
+    effortSynced = true;
+    try {
+      const cfg = await ipc.getSettings();
+      if (!userChangedReasoning) {
+        reasoningEffort = normalizeReasoningEffort(cfg.llm.reasoning_effort, 'off');
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function start(force = false) {
+    await ensureModelDefaultEffort();
     const qText = question.trim() || curQ;
     if (agent.chat && !qText) {
       stage = 'ask';
@@ -306,12 +323,19 @@
   }
 
   function onReasoningChange() {
+    userChangedReasoning = true;
     if (stage === 'done') regenerateCurrent();
   }
 
   onMount(() => {
     start();
+    const unS = onLlmStatus((s) => {
+      if (!userChangedReasoning && s.reasoning_effort) {
+        reasoningEffort = normalizeReasoningEffort(s.reasoning_effort, 'off');
+      }
+    });
     return () => {
+      unS.then((f) => f());
       cancel();
       stopSpeak();
     };

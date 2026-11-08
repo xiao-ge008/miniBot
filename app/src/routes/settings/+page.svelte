@@ -206,6 +206,7 @@
     folder_path: string;
     model_path: string;
     mmproj_path: string;
+    reasoning_effort: 'off' | 'low' | 'medium' | 'high' | 'max';
   }>({
     id: '',
     name: '',
@@ -213,6 +214,7 @@
     folder_path: '',
     model_path: '',
     mmproj_path: '',
+    reasoning_effort: 'off',
   });
 
   // 云端 API 交互状态
@@ -708,6 +710,21 @@
     return `${Math.round(c / 1024)}K`;
   }
 
+  function formatReasoningShort(eff?: string): string {
+    switch (eff) {
+      case 'low':
+        return '低';
+      case 'medium':
+        return '中';
+      case 'high':
+        return '高';
+      case 'max':
+        return '满';
+      default:
+        return '关';
+    }
+  }
+
   function buildModelTip(m: ModelCard): string {
     const lines: string[] = [];
     if (m.id === 'q4m') {
@@ -734,6 +751,7 @@
         ctx: Number(m.params.ctx) || 32768,
         ngl: Number(m.params.ngl ?? 99),
         kv_quant: m.params.kv_quant || 'q8_0',
+        reasoning_effort: (m.params.reasoning_effort || 'off') as ModelParams['reasoning_effort'],
         idle_secs: Math.max(30, Number(m.params.idle_secs) || 180),
         extra_args: (m.params.extra_args || '').trim(),
       };
@@ -755,6 +773,7 @@
       folder_path: '',
       model_path: '',
       mmproj_path: '',
+      reasoning_effort: 'off',
     };
     showCustomModelModal = true;
   }
@@ -769,6 +788,7 @@
       folder_path: m.folder_path || '',
       model_path: m.model_path,
       mmproj_path: m.mmproj_path || '',
+      reasoning_effort: (m.params?.reasoning_effort || 'off') as 'off' | 'low' | 'medium' | 'high' | 'max',
     };
     showCustomModelModal = true;
   }
@@ -812,6 +832,7 @@
     savingCustomModel = true;
     customScanError = '';
     try {
+      const existingCard = overview?.models.find((x) => x.id === customForm.id);
       const payload: CustomLocalModel = {
         id: customForm.id,
         name: customForm.name.trim(),
@@ -823,11 +844,12 @@
         quant_tag: '',
         size_label: '',
         params: {
-          ctx: 32768,
-          ngl: 99,
-          kv_quant: 'q8_0',
-          idle_secs: 180,
-          extra_args: '',
+          ctx: existingCard?.params?.ctx || 32768,
+          ngl: existingCard?.params?.ngl ?? 99,
+          kv_quant: existingCard?.params?.kv_quant || 'q8_0',
+          reasoning_effort: customForm.reasoning_effort || 'off',
+          idle_secs: existingCard?.params?.idle_secs || 180,
+          extra_args: existingCard?.params?.extra_args || '',
         },
       };
       overview = await ipc.engineSaveCustomModel(payload);
@@ -1346,7 +1368,7 @@
                         </label>
                       </div>
 
-                      <div class="cmp-grid">
+                      <div class="cmp-grid three">
                         <label class="cmp-field">
                           <span>模型名称</span>
                           <input
@@ -1360,6 +1382,23 @@
                             bind:value={customForm.desc}
                             placeholder="如：适合 8GB 显存的视觉推理模型"
                           />
+                        </label>
+                        <label class="cmp-field">
+                          <span class="mc-lbl-row">
+                            默认思考
+                            <span
+                              class="help-tip tip-left"
+                              data-tip="设置该模型的默认思考等级（截图、划词、AI 聊天默认同步此设置）。不支持高思考的自定义模型建议设为关闭或低/中。"
+                              >?</span
+                            >
+                          </span>
+                          <select bind:value={customForm.reasoning_effort}>
+                            <option value="off">关闭思考 (默认)</option>
+                            <option value="low">低强度 (512)</option>
+                            <option value="medium">中强度 (2K)</option>
+                            <option value="high">高强度 (8K)</option>
+                            <option value="max">满血无限制 (Max)</option>
+                          </select>
                         </label>
                       </div>
 
@@ -1412,6 +1451,7 @@
                               <span class="tag">{m.size_label}</span>
                               <span class="tag">{m.quant_tag}</span>
                               <span class="tag">{formatCtxLabel(m.params?.ctx)}</span>
+                              <span class="tag">思考:{formatReasoningShort(m.params?.reasoning_effort)}</span>
                               <span class="tag">{m.vision ? '视觉' : '文本'}</span>
                             </div>
                           </div>
@@ -1535,6 +1575,30 @@
                       {#if m.installed && expandedAdvModelId === m.id}
                         <div class="mc-adv-drawer">
                           <div class="mc-adv-grid">
+                            <label class="mc-param-field">
+                              <span class="mc-lbl-row">
+                                默认思考
+                                <span
+                                  class="help-tip"
+                                  data-tip="当前模型的默认思考等级（截图、划词、AI 聊天默认同步此设置，也可在对话界面随时切换）。不支持高思考的自定义模型建议设为关闭或低/中。"
+                                  >?</span
+                                >
+                              </span>
+                              <select
+                                value={m.params.reasoning_effort || 'off'}
+                                onchange={(e) => {
+                                  m.params.reasoning_effort = (e.currentTarget as HTMLSelectElement).value as ModelParams['reasoning_effort'];
+                                  handleSaveModelParams(m);
+                                }}
+                              >
+                                <option value="off">关闭 (关)</option>
+                                <option value="low">低 (512)</option>
+                                <option value="medium">中 (2K)</option>
+                                <option value="high">高 (8K)</option>
+                                <option value="max">满 (Max)</option>
+                              </select>
+                            </label>
+
                             <label class="mc-param-field">
                               <span class="mc-lbl-row">
                                 上下文
@@ -3109,6 +3173,9 @@
     grid-template-columns: 1fr 1fr;
     gap: 10px 12px;
   }
+  .cmp-grid.three {
+    grid-template-columns: 1.1fr 1.3fr 0.9fr;
+  }
   .cmp-field {
     display: flex;
     flex-direction: column;
@@ -3379,7 +3446,7 @@
   }
   .mc-adv-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px 10px;
   }
   .mc-adv-row2 {

@@ -554,6 +554,7 @@ fn apply_params_to_llm(llm: &mut crate::settings::LlmSettings, params: &crate::s
     } else {
         params.kv_quant.clone()
     };
+    llm.reasoning_effort = crate::settings::normalize_reasoning_effort(&params.reasoning_effort);
     llm.idle_secs = params.idle_secs.max(30);
     llm.extra_args = params.extra_args.clone();
 }
@@ -776,6 +777,12 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
             apply_params_to_llm(&mut s.llm, &models[i].params);
             let _ = st.settings.set(s.clone());
         }
+    } else if let Some(act_m) = models.iter().find(|m| m.installed && m.active) {
+        let norm_eff = crate::settings::normalize_reasoning_effort(&act_m.params.reasoning_effort);
+        if s.llm.reasoning_effort != norm_eff {
+            s.llm.reasoning_effort = norm_eff;
+            let _ = st.settings.set(s.clone());
+        }
     }
 
     EngineOverview {
@@ -811,6 +818,7 @@ pub async fn activate_model(app: &AppHandle, model_id: &str) -> anyhow::Result<E
     s.llm.required_vram_mb = if model_id == "q2s" { 1500 } else { 2400 };
     apply_params_to_llm(&mut s.llm, &card.params);
     st.settings.set(s)?;
+    st.llm.emit_status(app, "切换模型");
     Ok(get_overview(app).await)
 }
 
@@ -831,6 +839,7 @@ pub async fn update_model_params(
         } else {
             params.kv_quant.trim().to_lowercase()
         },
+        reasoning_effort: crate::settings::normalize_reasoning_effort(&params.reasoning_effort),
         idle_secs: params.idle_secs.max(30),
         extra_args: params.extra_args.trim().to_string(),
     };
@@ -845,14 +854,22 @@ pub async fn update_model_params(
         .models
         .iter()
         .any(|m| m.id == model_id && m.active);
+    let mut need_restart = false;
     if is_active {
+        need_restart = s.llm.ctx != clean_params.ctx
+            || s.llm.ngl != clean_params.ngl
+            || s.llm.kv_quant != clean_params.kv_quant
+            || s.llm.extra_args != clean_params.extra_args;
         apply_params_to_llm(&mut s.llm, &clean_params);
     }
     st.settings.set(s)?;
-    if is_active && st.llm.status() == crate::llm::Status::Ready {
-        st.llm
-            .release(app, crate::llm::Status::Released, "模型参数已更新，下次请求按新参数加载")
-            .await;
+    if is_active {
+        st.llm.emit_status(app, "模型参数已更新");
+        if need_restart && st.llm.status() == crate::llm::Status::Ready {
+            st.llm
+                .release(app, crate::llm::Status::Released, "模型参数已更新，下次请求按新参数加载")
+                .await;
+        }
     }
     Ok(get_overview(app).await)
 }

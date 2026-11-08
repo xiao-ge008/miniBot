@@ -30,6 +30,8 @@ pub struct StatusInfo {
     pub api_enabled: bool,
     /// 当前配置的云端模型名称
     pub api_model: String,
+    /// 当前生效模型的默认思考等级："off" | "low" | "medium" | "high" | "max"
+    pub reasoning_effort: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,6 +226,7 @@ impl LlmManager {
             reason: String::new(),
             api_enabled: llm_cfg.api_enabled,
             api_model: llm_cfg.api_model.clone(),
+            reasoning_effort: crate::settings::normalize_reasoning_effort(&llm_cfg.reasoning_effort),
         }
     }
 
@@ -784,6 +787,9 @@ impl LlmManager {
             messages
         };
 
+        let def_effort = crate::settings::normalize_reasoning_effort(&llm_cfg.reasoning_effort);
+        let def_enable_thinking = def_effort != "off";
+
         let mut body = serde_json::json!({
             "messages": final_messages,
             "stream": true,
@@ -796,17 +802,20 @@ impl LlmManager {
             "max_tokens": -1,
             "reasoning_format": "auto",
             "reasoning_control": true,
-            // 默认开启深度思考链（对齐 llama.cpp 原生模板）
-            "chat_template_kwargs": { "enable_thinking": true },
+            "chat_template_kwargs": { "enable_thinking": def_enable_thinking },
         });
+        if def_enable_thinking {
+            body["reasoning_effort"] = serde_json::Value::String(def_effort);
+        }
         if let (Some(b), Some(p)) = (body.as_object_mut(), params.as_object()) {
             for (k, v) in p {
                 b.insert(k.clone(), v.clone());
             }
         }
+        let endpoint = format!("http://127.0.0.1:{port}/v1/chat/completions");
         let client = reqwest::Client::builder().no_proxy().build()?;
-        let resp = match client
-            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        let mut resp = match client
+            .post(&endpoint)
             .json(&body)
             .send()
             .await
@@ -819,6 +828,37 @@ impl LlmManager {
                 return Err(e.into());
             }
         };
+
+        // 兼容保护：若自定义模型的 Jinja 聊天模板不支持特定思考等级（如没有 high/max）或不支持思考参数返回 400/500，自动降级重试
+        if !resp.status().is_success() {
+            if let Some(ye) = self.yield_error(required_mb) {
+                return Err(ye);
+            }
+            // 第一级回退：移除 reasoning_effort（保留 enable_thinking 与 budget）重试
+            if body.get("reasoning_effort").is_some() {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove("reasoning_effort");
+                }
+                if let Ok(r2) = client.post(&endpoint).json(&body).send().await {
+                    resp = r2;
+                }
+            }
+            // 第二级回退：若仍失败，移除所有思考模板扩展字段，以纯标准 OpenAI 请求重试
+            if !resp.status().is_success() {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove("reasoning_effort");
+                    obj.remove("chat_template_kwargs");
+                    obj.remove("thinking_budget_tokens");
+                    obj.remove("reasoning_budget_tokens");
+                    obj.remove("reasoning_control");
+                    obj.remove("reasoning_format");
+                }
+                if let Ok(r3) = client.post(&endpoint).json(&body).send().await {
+                    resp = r3;
+                }
+            }
+        }
+
         if !resp.status().is_success() {
             if let Some(ye) = self.yield_error(required_mb) {
                 return Err(ye);

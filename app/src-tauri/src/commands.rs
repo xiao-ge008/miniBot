@@ -636,3 +636,37 @@ pub fn localsend_set_context_menu(enable: bool) -> R<bool> {
     crate::localsend::set_context_menu_registered(enable).map_err(e)
 }
 
+// ---------- 版本检测与自动下载安装更新 ----------
+
+#[tauri::command]
+pub async fn app_check_update(app: AppHandle) -> R<crate::updater::UpdateInfo> {
+    let cur = app.package_info().version.to_string();
+    crate::updater::check_update(&cur).await
+}
+
+#[tauri::command]
+pub async fn app_download_update(
+    download_url: String,
+    asset_name: String,
+    use_mirror: bool,
+    on_progress: Channel<crate::updater::UpdateDownloadProgress>,
+) -> R<String> {
+    crate::updater::download_update(download_url, asset_name, use_mirror, on_progress).await
+}
+
+#[tauri::command]
+pub fn app_cancel_update_download() {
+    crate::updater::cancel_update_download();
+}
+
+#[tauri::command]
+pub async fn app_install_update(app: AppHandle, installer_path: String) -> R<()> {
+    crate::updater::install_update(&app, installer_path).await
+}
+
+#[tauri::command]
+pub fn open_external_url(app: AppHandle, url: String) -> R<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(url, None::<&str>).map_err(e)
+}
+

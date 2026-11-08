@@ -24,6 +24,8 @@ import type {
   SearchResponse,
   Settings,
   StatusInfo,
+  UpdateDownloadProgress,
+  UpdateInfo,
   VoiceOption,
 } from './types';
 
@@ -132,6 +134,26 @@ export const ipc = {
   },
   localSendCancel: () => invoke<void>('localsend_cancel'),
   localSendSetContextMenu: (enable: boolean) => invoke<boolean>('localsend_set_context_menu', { enable }),
+
+  appCheckUpdate: () => invoke<UpdateInfo>('app_check_update'),
+  appDownloadUpdate: (
+    downloadUrl: string,
+    assetName: string,
+    useMirror: boolean,
+    onProgress: (p: UpdateDownloadProgress) => void,
+  ) => {
+    const ch = new Channel<UpdateDownloadProgress>();
+    ch.onmessage = onProgress;
+    return invoke<string>('app_download_update', {
+      downloadUrl,
+      assetName,
+      useMirror,
+      onProgress: ch,
+    });
+  },
+  appCancelUpdateDownload: () => invoke<void>('app_cancel_update_download'),
+  appInstallUpdate: (installerPath: string) => invoke<void>('app_install_update', { installerPath }),
+  openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
 };
 
 /** 订阅本窗口的 Payload 投递：挂载时取一次，之后每次投递再取 */

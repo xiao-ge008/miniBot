@@ -274,6 +274,62 @@ mod imp {
             let _ = ShowWindow(h, SW_MINIMIZE);
         }
     }
+
+    /// 通知 Windows Explorer 刷新当前可执行文件及快捷方式的图标缓存（解决覆盖安装后仍显示旧图标缓存问题）
+    pub fn refresh_shell_icon_cache() {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn SHChangeNotify(
+                wEventId: i32,
+                uFlags: u32,
+                dwItem1: *const std::ffi::c_void,
+                dwItem2: *const std::ffi::c_void,
+            );
+        }
+        const SHCNE_UPDATEITEM: i32 = 0x0000_2000;
+        const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000;
+        const SHCNF_IDLIST: u32 = 0x0000;
+        const SHCNF_PATHW: u32 = 0x0005;
+        const SHCNF_FLUSHNOWAIT: u32 = 0x2000;
+
+        let notify_path = |p: &std::path::Path| {
+            let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            unsafe {
+                SHChangeNotify(
+                    SHCNE_UPDATEITEM,
+                    SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                    wide.as_ptr() as *const std::ffi::c_void,
+                    std::ptr::null(),
+                );
+            }
+        };
+
+        if let Ok(exe) = std::env::current_exe() {
+            notify_path(&exe);
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let desktop_lnk = std::path::PathBuf::from(profile).join("Desktop").join("miniBot.lnk");
+            if desktop_lnk.exists() {
+                notify_path(&desktop_lnk);
+            }
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let start_lnk = std::path::PathBuf::from(appdata)
+                .join(r"Microsoft\Windows\Start Menu\Programs\miniBot.lnk");
+            if start_lnk.exists() {
+                notify_path(&start_lnk);
+            }
+        }
+        unsafe {
+            SHChangeNotify(
+                SHCNE_ASSOCCHANGED,
+                SHCNF_IDLIST | SHCNF_FLUSHNOWAIT,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -337,6 +393,8 @@ mod imp {
     pub fn hide_hwnd(_hwnd: isize) {}
 
     pub fn minimize_hwnd(_hwnd: isize) {}
+
+    pub fn refresh_shell_icon_cache() {}
 }
 
 pub use imp::*;

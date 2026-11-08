@@ -26,6 +26,12 @@ pub fn deliver(app: &AppHandle, label: &str, p: Payload) {
 }
 
 fn builder<'a>(app: &'a AppHandle, label: &str, route: &str) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    let b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()));
+    if let Some(ic) = app.default_window_icon() {
+        if let Ok(b_with_icon) = b.icon(ic.clone()) {
+            return b_with_icon;
+        }
+    }
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()))
 }
 

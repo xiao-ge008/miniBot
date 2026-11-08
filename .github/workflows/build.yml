@@ -49,6 +49,16 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: app/pnpm-lock.yaml
 
+      - name: Read version from tauri.conf.json
+        id: get_version
+        shell: node {0}
+        run: |
+          const fs = require('fs');
+          const conf = JSON.parse(fs.readFileSync('app/src-tauri/tauri.conf.json', 'utf8'));
+          const ver = conf.version || '0.1.0';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${ver}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=v${ver}\n`);
+
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -72,18 +82,20 @@ jobs:
           path: ${{ matrix.bundle_path }}
           if-no-files-found: error
 
-      - name: Publish to GitHub Release (on main/master or tag)
+      - name: Publish to GitHub Release
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: miniBot v0.1.0 (Windows & macOS)
+          tag_name: ${{ steps.get_version.outputs.tag }}
+          name: miniBot ${{ steps.get_version.outputs.tag }} (Windows & macOS)
           body: |
-            ## miniBot v0.1.0 自动构建安装包
-            - **Windows (x64)**: 下载 `miniBot_0.1.0_x64-setup.exe`
-            - **macOS (Apple Silicon)**: 下载 `miniBot_0.1.0_aarch64.dmg`
-            > 注：本安装包不包含本地 `llama` 引擎与 `.gguf` 模型文件；首次启动后可在「设置 -> 本地引擎与模型」中按需一键下载，或直接启用「模型 API」使用云端模型。
+            ## miniBot ${{ steps.get_version.outputs.tag }} 官方安装包
+            - **Windows (x64)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_x64-setup.exe`
+            - **macOS (Apple Silicon)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_aarch64.dmg`
+            - **客户端在线更新**: 已安装旧版本的用户可直接打开 **「miniBot 设置 -> 版本更新」** 点击 **「检查更新」** 一键自动下载并覆盖升级。
+            > 注：本安装包不包含本地 `llama` 引擎与 `.gguf` 模型文件；首次启动后可在「设置 -> 本地模型」中按需一键下载，或直接启用「模型 API」使用云端模型。
           files: ${{ matrix.bundle_path }}
           prerelease: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

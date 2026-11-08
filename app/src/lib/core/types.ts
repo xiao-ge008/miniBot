@@ -276,3 +276,28 @@ export interface LocalSendProgress {
   message: string;
 }
 
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_name: string;
+  release_notes: string;
+  published_at: string;
+  html_url: string;
+  asset_name: string;
+  download_url: string;
+  asset_size_mb: number;
+  platform: 'windows' | 'macos' | 'linux' | string;
+}
+
+export interface UpdateDownloadProgress {
+  stage: 'downloading' | 'done' | 'cancelled' | 'error';
+  file_name: string;
+  downloaded_mb: number;
+  total_mb: number;
+  speed_mbps: number;
+  percent: number;
+  saved_path: string;
+  message: string;
+}
+

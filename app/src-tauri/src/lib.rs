@@ -18,6 +18,7 @@ mod qr;
 mod settings;
 mod tray;
 mod tts;
+mod updater;
 mod websearch;
 mod winutil;
 mod wins;
@@ -103,6 +104,7 @@ pub fn run() {
             });
 
             tray::setup(&handle)?;
+            winutil::refresh_shell_icon_cache();
             // 预创建失败不致命：窗口会在首次使用时按需创建
             if let Err(e) = wins::precreate(&handle) {
                 eprintln!("[setup] 预创建窗口失败：{e}");
@@ -213,6 +215,11 @@ pub fn run() {
             commands::localsend_send,
             commands::localsend_cancel,
             commands::localsend_set_context_menu,
+            commands::app_check_update,
+            commands::app_download_update,
+            commands::app_cancel_update_download,
+            commands::app_install_update,
+            commands::open_external_url,
         ])
         .build(tauri::generate_context!())
         .expect("miniBot 启动失败");

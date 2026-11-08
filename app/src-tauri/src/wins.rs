@@ -18,6 +18,24 @@ pub fn hwnd_of(w: &WebviewWindow) -> isize {
     }
 }
 
+/// 将指定窗口标记为「从屏幕捕获/录屏中排除」（Windows WDA_EXCLUDEFROMCAPTURE / macOS NSWindowSharingNone）
+pub fn exclude_from_capture(w: &WebviewWindow, exclude: bool) {
+    #[cfg(windows)]
+    {
+        crate::winutil::set_exclude_from_capture(hwnd_of(w), exclude);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(ptr) = w.ns_window() {
+            crate::winutil::set_exclude_from_capture(ptr as isize, exclude);
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = (w, exclude);
+    }
+}
+
 /// 跨平台判断屏幕坐标 (x, y) 是否在指定窗口矩形内（Windows 走物理像素 HWND，macOS 走逻辑点坐标）
 pub fn point_in_win(w: &WebviewWindow, x: i32, y: i32) -> bool {
     #[cfg(windows)]
@@ -88,6 +106,49 @@ fn build_tip(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(w)
 }
 
+fn build_recorder(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let w = builder(app, "recorder", "recorder")
+        .title("miniBot 录屏")
+        .inner_size(480.0, 56.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .build()?;
+    exclude_from_capture(&w, true);
+    prevent_destroy_on_close(&w);
+    Ok(w)
+}
+
+fn build_recorder_border(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let w = builder(app, "recorder_border", "recorder")
+        .title("miniBot 录屏区域")
+        .inner_size(400.0, 300.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .build()?;
+    let _ = w.set_ignore_cursor_events(true);
+    exclude_from_capture(&w, true);
+    #[cfg(windows)]
+    {
+        let h = hwnd_of(&w);
+        crate::winutil::make_click_through(h);
+        crate::winutil::set_exclude_from_capture(h, true);
+    }
+    prevent_destroy_on_close(&w);
+    Ok(w)
+}
+
 fn build_result(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let ui = app.state::<crate::AppState>().settings.get().ui;
     let rw = ui.result_width.clamp(360.0, 1400.0);
@@ -144,6 +205,8 @@ pub fn get_or_build(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
     }
     let r = match label {
         "tip" => build_tip(app),
+        "recorder" => build_recorder(app),
+        "recorder_border" => build_recorder_border(app),
         "result" => build_result(app),
         "capture" => build_capture(app),
         "launcher" => build_launcher(app),
@@ -156,6 +219,8 @@ pub fn get_or_build(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
 pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
     for (name, f) in [
         ("tip", build_tip as fn(&AppHandle) -> tauri::Result<WebviewWindow>),
+        ("recorder", build_recorder),
+        ("recorder_border", build_recorder_border),
         ("result", build_result),
         ("capture", build_capture),
         ("launcher", build_launcher),
@@ -287,6 +352,140 @@ pub fn show_tip(app: &AppHandle, p: Payload) {
             });
             std::thread::sleep(std::time::Duration::from_millis(25));
             crate::winutil::show_noactivate(h);
+        }
+    });
+}
+
+/// 打开极简录屏控制胶囊条与鼠标穿透防穿帮选区高亮框
+pub fn open_recorder_hud(app: &AppHandle, args: &crate::recorder::RecordStartArgs) {
+    let args = args.clone();
+    run_win_task(app, move |app2| {
+        // 1. 定位并展示录制区域边框指示窗（完全鼠标穿透 + 视频画面隐身）
+        if let Some(wb) = get_or_build(&app2, "recorder_border") {
+            let _ = wb.set_ignore_cursor_events(true);
+            exclude_from_capture(&wb, true);
+
+            #[cfg(target_os = "macos")]
+            {
+                let s = args.scale.max(1.0);
+                let mon_w = (args.monitor_w as f32 / s).round() as i32;
+                let mon_h = (args.monitor_h as f32 / s).round() as i32;
+                let rx = args.monitor_x + (args.crop_x as f32 / s).round() as i32;
+                let ry = args.monitor_y + (args.crop_y as f32 / s).round() as i32;
+                let rw = (args.crop_w as f32 / s).round() as i32;
+                let rh = (args.crop_h as f32 / s).round() as i32;
+                let is_full = rw >= mon_w - 4 && rh >= mon_h - 4;
+                let pad = if is_full { 0 } else { 3 };
+                let bx = (rx - pad).max(args.monitor_x);
+                let by = (ry - pad).max(args.monitor_y);
+                let bw = (rw + pad * 2).min(args.monitor_x + mon_w - bx).max(24);
+                let bh = (rh + pad * 2).min(args.monitor_y + mon_h - by).max(24);
+                let _ = wb.set_position(tauri::LogicalPosition::new(bx as f64, by as f64));
+                let _ = wb.set_size(tauri::LogicalSize::new(bw as f64, bh as f64));
+                let _ = wb.show();
+                let _ = wb.set_ignore_cursor_events(true);
+                exclude_from_capture(&wb, true);
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let mon_w = args.monitor_w as i32;
+                let mon_h = args.monitor_h as i32;
+                let rx = args.monitor_x + args.crop_x as i32;
+                let ry = args.monitor_y + args.crop_y as i32;
+                let rw = args.crop_w as i32;
+                let rh = args.crop_h as i32;
+                let is_full = rw >= mon_w - 4 && rh >= mon_h - 4;
+                let pad = if is_full { 0 } else { 3 };
+                let bx = (rx - pad).max(args.monitor_x);
+                let by = (ry - pad).max(args.monitor_y);
+                let bw = (rw + pad * 2).min(args.monitor_x + mon_w - bx).max(24);
+                let bh = (rh + pad * 2).min(args.monitor_y + mon_h - by).max(24);
+                let _ = wb.set_position(PhysicalPosition::new(bx, by));
+                let _ = wb.set_size(tauri::PhysicalSize::new(bw as u32, bh as u32));
+                let _ = wb.show();
+                let _ = wb.set_ignore_cursor_events(true);
+                exclude_from_capture(&wb, true);
+                #[cfg(windows)]
+                {
+                    let hb = hwnd_of(&wb);
+                    crate::winutil::show_click_through_rect(hb, bx, by, bw, bh);
+                    let wb_main = wb.clone();
+                    let _ = app2.run_on_main_thread(move || {
+                        let _ = wb_main.set_ignore_cursor_events(true);
+                        crate::winutil::show_click_through_rect(hb, bx, by, bw, bh);
+                    });
+                }
+            }
+        }
+
+        // 2. 定位并展示极简录屏悬浮控制胶囊条（优先选区正上方 -> 选区正下方 -> 全屏时屏幕顶部居中）
+        let Some(w) = get_or_build(&app2, "recorder") else { return };
+        exclude_from_capture(&w, true);
+
+        #[cfg(target_os = "macos")]
+        {
+            let s = args.scale.max(1.0);
+            let mon_w = (args.monitor_w as f32 / s).round() as i32;
+            let mon_h = (args.monitor_h as f32 / s).round() as i32;
+            let cx = args.monitor_x + (args.crop_x as f32 / s).round() as i32;
+            let cy = args.monitor_y + (args.crop_y as f32 / s).round() as i32;
+            let cw = (args.crop_w as f32 / s).round() as i32;
+            let ch = (args.crop_h as f32 / s).round() as i32;
+            let hud_w = 260;
+            let hud_h = 46;
+            let mon_right = args.monitor_x + mon_w;
+            let mon_bottom = args.monitor_y + mon_h;
+            let x = (cx + (cw - hud_w) / 2).clamp(args.monitor_x + 12, (mon_right - 380).max(args.monitor_x + 12));
+            let y = if cy - args.monitor_y >= hud_h + 14 {
+                cy - hud_h - 10
+            } else if cy + ch + hud_h + 14 <= mon_bottom {
+                cy + ch + 10
+            } else {
+                args.monitor_y + 28
+            };
+            let _ = w.set_size(tauri::LogicalSize::new(480.0, 56.0));
+            let _ = w.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let s = args.scale.max(1.0);
+            let hud_w = (260.0 * s).round() as i32;
+            let hud_max_w = (440.0 * s).round() as i32;
+            let hud_h = (48.0 * s).round() as i32;
+            let cx = args.monitor_x + args.crop_x as i32;
+            let cy = args.monitor_y + args.crop_y as i32;
+            let cw = args.crop_w as i32;
+            let ch = args.crop_h as i32;
+            let mon_right = args.monitor_x + args.monitor_w as i32;
+            let mon_bottom = args.monitor_y + args.monitor_h as i32;
+            let x = (cx + (cw - hud_w) / 2).clamp(
+                args.monitor_x + 12,
+                (mon_right - hud_max_w - 12).max(args.monitor_x + 12),
+            );
+            let y = if cy - args.monitor_y >= hud_h + 14 {
+                cy - hud_h - 10
+            } else if cy + ch + hud_h + 14 <= mon_bottom {
+                cy + ch + 10
+            } else {
+                args.monitor_y + 18
+            };
+            let _ = w.set_size(tauri::LogicalSize::new(480.0, 56.0));
+            let _ = w.set_position(PhysicalPosition::new(x, y));
+        }
+
+        let _ = w.show();
+        exclude_from_capture(&w, true);
+        #[cfg(windows)]
+        {
+            let h = hwnd_of(&w);
+            crate::winutil::show_noactivate(h);
+            crate::winutil::set_exclude_from_capture(h, true);
+            let _ = app2.run_on_main_thread(move || {
+                crate::winutil::show_noactivate(h);
+                crate::winutil::set_exclude_from_capture(h, true);
+            });
         }
     });
 }

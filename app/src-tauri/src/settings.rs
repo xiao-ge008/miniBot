@@ -7,6 +7,7 @@ use std::sync::RwLock;
 #[serde(default)]
 pub struct Hotkeys {
     pub capture: String,
+    pub record: String,
     pub launcher: String,
     pub selection: String,
     pub color: String,
@@ -16,6 +17,7 @@ impl Default for Hotkeys {
     fn default() -> Self {
         Self {
             capture: "Alt+Q".into(),
+            record: "Alt+R".into(),
             launcher: "Alt+Space".into(),
             selection: "Alt+W".into(),
             color: "Alt+C".into(),

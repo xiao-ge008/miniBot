@@ -42,7 +42,7 @@
   let pixels: ImageData | null = null;
   let payload: Payload | null = null;
 
-  let mode = $state<'capture' | 'color' | 'chat'>('capture');
+  let mode = $state<'capture' | 'color' | 'chat' | 'record'>('capture');
   let W = $state(0);
   let H = $state(0);
   let scale = 1;
@@ -77,6 +77,14 @@
   let barW = $state(0);
   let barH = $state(0);
   let raf = 0;
+
+  // 极简录屏参数状态
+  let recMode = $state(false);
+  let recSysAudio = $state(true);
+  let recMicAudio = $state(false);
+  let recCursor = $state(true);
+  let recFps = $state<30 | 60>(60);
+  let recStarting = $state(false);
 
   /** 参考 eSearch #clip_wh：支持四则运算表达式（如 800+20, 1920/2） */
   function evalMath(expr: string, fallback: number): number {
@@ -671,6 +679,39 @@
     }
   }
 
+  async function startRecord() {
+    if (recStarting) return;
+    const r = sel ?? { x: 0, y: 0, w: W, h: H };
+    recStarting = true;
+    try {
+      await ipc.recorderStart({
+        monitor_x: originX,
+        monitor_y: originY,
+        monitor_w: W,
+        monitor_h: H,
+        scale,
+        crop_x: Math.max(0, Math.round(r.x)),
+        crop_y: Math.max(0, Math.round(r.y)),
+        crop_w: Math.max(32, Math.round(r.w)),
+        crop_h: Math.max(32, Math.round(r.h)),
+        fps: recFps,
+        system_audio: recSysAudio,
+        mic_audio: recMicAudio,
+        capture_cursor: recCursor,
+      });
+      phase = 'idle';
+      sel = null;
+      shapes = [];
+      tool = null;
+      recMode = false;
+    } catch (e: any) {
+      toast = `启动录屏失败：${e?.message ?? e}`;
+      setTimeout(() => (toast = ''), 2800);
+    } finally {
+      recStarting = false;
+    }
+  }
+
   function close() {
     const returnToChat = mode === 'chat';
     phase = 'idle';
@@ -681,6 +722,7 @@
     textEdit = null;
     sizeEdit = false;
     beautify = false;
+    recMode = false;
     ipc.captureClose();
     if (returnToChat) {
       ipc.trigger('launcher');
@@ -706,6 +748,7 @@
     else if (mod && key === 'z' && !e.shiftKey) undo();
     else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) redo();
     else if (mod && key === 'c' && sel) act('copy');
+    else if (e.key === 'Enter' && (mode === 'record' || recMode)) startRecord();
     else if (e.key === 'Enter' && sel) act(mode === 'chat' ? 'attach_chat' : 'copy');
     else if (key === 'c' && !mod) copyColor(e.shiftKey);
     else if (key === 'f' && mode !== 'color') {
@@ -762,7 +805,9 @@
     await loadActions();
     payload = p;
     const f = p.meta!.frame;
-    mode = p.meta!.mode === 'color' ? 'color' : p.meta!.mode === 'chat' ? 'chat' : 'capture';
+    const m = p.meta!.mode;
+    mode = m === 'color' ? 'color' : m === 'chat' ? 'chat' : m === 'record' ? 'record' : 'capture';
+    recMode = mode === 'record';
     W = f.width;
     H = f.height;
     scale = f.scale || 1;
@@ -856,7 +901,7 @@
     const rh = Math.round(sel.h * ky);
 
     const bw = barW || 420;
-    const bh = barH || (tool || beautify ? 76 : 36);
+    const bh = barH || (tool || beautify || recMode ? 76 : 36);
 
     // 默认与截图框左边缘对齐；若右侧空间不足则与截图框右边缘对齐
     let left = rx;
@@ -1120,6 +1165,20 @@
             <button class="tb label-tb hot" title={`已识别 ${qrCount} 个二维码`} onclick={() => act('qr')}>二维码</button>
           {/if}
           <span class="sep"></span>
+          <button
+            class="tb label-tb rec-toggle"
+            class:on={recMode}
+            title="录屏模式（录制当前选区为 MP4 视频）"
+            onclick={() => {
+              toolMenuOpen = false;
+              tool = null;
+              beautify = false;
+              recMode = !recMode;
+            }}
+          >
+            <span class="rec-dot-sm"></span>
+            <span>录屏</span>
+          </button>
           <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>发送</button>
           <button class="tb label-tb" title="钉到桌面 (屏幕贴图)" onclick={() => act('pin')}>贴图</button>
           <button class="tb label-tb" title="选择文件夹保存图片" onclick={() => act('save')}>保存</button>
@@ -1137,6 +1196,52 @@
           </button>
         {/if}
       </div>
+      {#if recMode}
+        <div class="row props rec-props">
+          <span class="prop-lbl">录屏设置</span>
+          <button
+            class="tb label-tb rec-opt"
+            class:on={recSysAudio}
+            title="录制电脑系统播放的声音"
+            onclick={() => (recSysAudio = !recSysAudio)}
+          >
+            <span>{recSysAudio ? '✓ 系统声' : '系统声'}</span>
+          </button>
+          <button
+            class="tb label-tb rec-opt"
+            class:on={recMicAudio}
+            title="同时录制麦克风声音"
+            onclick={() => (recMicAudio = !recMicAudio)}
+          >
+            <span>{recMicAudio ? '✓ 麦克风' : '麦克风'}</span>
+          </button>
+          <button
+            class="tb label-tb rec-opt"
+            class:on={recCursor}
+            title="在录制的视频中显示鼠标光标"
+            onclick={() => (recCursor = !recCursor)}
+          >
+            <span>{recCursor ? '✓ 光标' : '光标'}</span>
+          </button>
+          <button
+            class="tb label-tb rec-opt"
+            title="切换录制帧率（30 / 60 FPS）"
+            onclick={() => (recFps = recFps === 60 ? 30 : 60)}
+          >
+            <span>{recFps} FPS</span>
+          </button>
+          <span class="sep"></span>
+          <button
+            class="tb label-tb rec-start-btn"
+            disabled={recStarting}
+            title="立即开始录制选区 (Enter)"
+            onclick={startRecord}
+          >
+            <span class="rec-dot-sm live"></span>
+            <span>{recStarting ? '启动中…' : '开始录制'}</span>
+          </button>
+        </div>
+      {/if}
       {#if tool || beautify}
         <div class="row props">
           {#if tool && tool !== 'mosaic' && tool !== 'blur'}
@@ -1194,6 +1299,59 @@
 
   {#if mode === 'color'}
     <div class="hint">单击复制 HEX · Shift+C 复制 RGB · Esc 退出</div>
+  {:else if mode === 'record' && !sel}
+    <div class="hint">拖动框选录制区域 · 单击选窗口 · 按 Enter 或点击下方按钮直接录制全屏 · Esc 退出</div>
+    <div class="rec-quick-bar" role="toolbar" tabindex="-1" onmousedown={(e) => e.stopPropagation()}>
+      <div class="row">
+        <button
+          class="tb label-tb rec-opt"
+          class:on={recSysAudio}
+          title="录制电脑系统播放的声音"
+          onclick={() => (recSysAudio = !recSysAudio)}
+        >
+          <span>{recSysAudio ? '✓ 系统声' : '系统声'}</span>
+        </button>
+        <button
+          class="tb label-tb rec-opt"
+          class:on={recMicAudio}
+          title="同时录制麦克风声音"
+          onclick={() => (recMicAudio = !recMicAudio)}
+        >
+          <span>{recMicAudio ? '✓ 麦克风' : '麦克风'}</span>
+        </button>
+        <button
+          class="tb label-tb rec-opt"
+          class:on={recCursor}
+          title="在录制的视频中显示鼠标光标"
+          onclick={() => (recCursor = !recCursor)}
+        >
+          <span>{recCursor ? '✓ 光标' : '光标'}</span>
+        </button>
+        <button
+          class="tb label-tb rec-opt"
+          title="切换录制帧率（30 / 60 FPS）"
+          onclick={() => (recFps = recFps === 60 ? 30 : 60)}
+        >
+          <span>{recFps} FPS</span>
+        </button>
+        <span class="sep"></span>
+        <button
+          class="tb label-tb rec-start-btn"
+          disabled={recStarting}
+          title="直接开始录制当前全屏 (Enter)"
+          onclick={startRecord}
+        >
+          <span class="rec-dot-sm live"></span>
+          <span>{recStarting ? '启动中…' : '全屏录制'}</span>
+        </button>
+        <button class="tb icon-tb cancel-btn" title="取消 (Esc)" aria-label="取消" onclick={close}>
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <line x1="4" y1="4" x2="12" y2="12" />
+            <line x1="12" y1="4" x2="4" y2="12" />
+          </svg>
+        </button>
+      </div>
+    </div>
   {:else if !sel}
     <div class="hint">拖动框选 · 单击选窗口 · F 全屏 · 方向键微调 · C 复制颜色 · Esc 退出</div>
   {/if}
@@ -1334,6 +1492,64 @@
   }
   .tb.hot {
     color: var(--accent-blue);
+  }
+  .tb.rec-toggle {
+    gap: 5px;
+  }
+  .rec-dot-sm {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--danger);
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .tb.on .rec-dot-sm {
+    background: currentColor;
+  }
+  .rec-dot-sm.live {
+    background: #fff;
+  }
+  .rec-props {
+    gap: 4px;
+  }
+  .tb.rec-opt {
+    height: 25px;
+    padding: 0 7px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .tb.rec-opt.on {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: transparent;
+  }
+  .tb.rec-start-btn {
+    height: 26px;
+    padding: 0 10px;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--danger);
+    color: #fff;
+    border-radius: 6px;
+  }
+  .tb.rec-start-btn:hover:not(:disabled) {
+    background: #dc2626;
+  }
+  .rec-quick-bar {
+    position: absolute;
+    bottom: 36px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 5px 8px;
+    z-index: 10;
   }
 
   /* 默认画框 + 下拉选择分体组合按钮 */

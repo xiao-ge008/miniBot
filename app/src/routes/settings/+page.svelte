@@ -232,8 +232,6 @@
   let updateInfo = $state<UpdateInfo | null>(null);
   let checkingUpdate = $state(false);
   let updateCheckError = $state('');
-  let useUpdateMirror = $state(true);
-  let autoInstallAfterDownload = $state(true);
   let downloadingUpdate = $state(false);
   let updateDlProgress = $state<UpdateDownloadProgress | null>(null);
   let downloadedInstallerPath = $state('');
@@ -276,10 +274,11 @@
   let blacklistText = $state('');
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
-  type HotkeyField = 'launcher' | 'capture' | 'selection' | 'color';
+  type HotkeyField = 'launcher' | 'capture' | 'record' | 'selection' | 'color';
   const HOTKEY_ITEMS: { key: HotkeyField; label: string; hint: string }[] = [
     { key: 'launcher', label: '呼出 AI 智能聊天框', hint: '示例：Alt+Space、Ctrl+Alt+Space' },
-    { key: 'capture', label: '区域截图识别', hint: '示例：Alt+A、Ctrl+Alt+A、Ctrl+Shift+A' },
+    { key: 'capture', label: '区域截图识别', hint: '示例：Alt+Q、Ctrl+Alt+A、Ctrl+Shift+A' },
+    { key: 'record', label: '屏幕录制（再按一次完成保存）', hint: '示例：Alt+R、Ctrl+Alt+R' },
     { key: 'selection', label: '处理当前选中文字', hint: '示例：Alt+W、Ctrl+Alt+W' },
     { key: 'color', label: '屏幕取色器', hint: '示例：Alt+C、Ctrl+Alt+C' },
   ];
@@ -539,14 +538,14 @@
       const savedPath = await ipc.appDownloadUpdate(
         updateInfo.download_url,
         updateInfo.asset_name,
-        useUpdateMirror,
+        true,
         (p) => {
           updateDlProgress = p;
         },
       );
       downloadedInstallerPath = savedPath;
       flashMsg('✓ 更新包下载完成', 3500);
-      if (autoInstallAfterDownload && savedPath) {
+      if (savedPath) {
         await handleRunInstaller(savedPath);
       }
     } catch (e) {
@@ -2297,58 +2296,44 @@
           </section>
 
         {:else if tab === '版本更新'}
-          <!-- 1. 版本状态概览与检查更新卡片 -->
           <section class="group">
-            <div class="group-title">版本状态与云端检测</div>
             <div class="card">
               <div class="upd-hero">
                 <div class="upd-app-meta">
                   <img src="/logo.png" alt="miniBot" class="upd-logo" />
                   <div class="upd-titles">
                     <div class="upd-name-row">
-                      <span class="upd-app-name">miniBot 桌面 AI 效率工具</span>
-                      <span class="ver-pill">当前 v{info?.version ?? '0.1.0'}</span>
+                      <span class="upd-app-name">miniBot</span>
+                      <span class="ver-pill">v{info?.version ?? '0.1.0'}</span>
                       {#if updateInfo?.has_update}
-                        <span class="upd-status-badge new">🎉 发现新版本 v{updateInfo.latest_version}</span>
+                        <span class="upd-status-badge new">发现新版本 v{updateInfo.latest_version}</span>
                       {:else if updateInfo}
-                        <span class="upd-status-badge ok">✓ 已是最新版本</span>
-                      {/if}
-                    </div>
-                    <div class="upd-sub">
-                      开源仓库：
-                      <button
-                        type="button"
-                        class="link-inline"
-                        onclick={() => ipc.openExternalUrl('https://github.com/xiao-ge008/miniBot')}
-                      >
-                        github.com/xiao-ge008/miniBot
-                      </button>
-                      {#if updateInfo?.published_at}
-                        <span class="upd-dot">·</span>
-                        <span>最近发布：{updateInfo.published_at}</span>
+                        <span class="upd-status-badge ok">已是最新版本</span>
                       {/if}
                     </div>
                   </div>
                 </div>
 
                 <div class="upd-hero-actions">
+                  {#if updateInfo?.has_update && updateInfo.download_url}
+                    <button
+                      type="button"
+                      class="primary"
+                      onclick={handleDownloadAndInstallUpdate}
+                      disabled={downloadingUpdate}
+                    >
+                      {downloadingUpdate
+                        ? `正在下载 (${updateDlProgress?.percent ?? 0}%)…`
+                        : `立即更新 v${updateInfo.latest_version}`}
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     class="act-btn"
                     onclick={() => handleCheckUpdate(true)}
                     disabled={checkingUpdate || downloadingUpdate}
                   >
-                    {checkingUpdate ? '正在检测…' : '🔄 检查更新'}
-                  </button>
-                  <button
-                    type="button"
-                    class="act-btn"
-                    onclick={() =>
-                      ipc.openExternalUrl(
-                        updateInfo?.html_url || 'https://github.com/xiao-ge008/miniBot/releases',
-                      )}
-                  >
-                    🌐 GitHub Releases
+                    {checkingUpdate ? '检测中…' : '检测更新'}
                   </button>
                 </div>
               </div>
@@ -2360,42 +2345,6 @@
                 </div>
               {/if}
 
-              <div class="divider"></div>
-
-              <!-- 下载源选择与自动安装配置 -->
-              <div class="grid-2">
-                <label class="field">
-                  <span>更新包下载通道</span>
-                  <select bind:value={useUpdateMirror} disabled={downloadingUpdate}>
-                    <option value={true}>🚀 国内高速镜像加速 (ghfast / gh-proxy · 推荐)</option>
-                    <option value={false}>🌍 GitHub 官方源直连 (github.com)</option>
-                  </select>
-                </label>
-
-                <label class="field">
-                  <span>当前系统架构与安装包</span>
-                  <input
-                    readonly
-                    value={updateInfo?.asset_name
-                      ? `${updateInfo.asset_name}${updateInfo.asset_size_mb > 0 ? ` (${updateInfo.asset_size_mb.toFixed(1)} MB)` : ''}`
-                      : '等待云端 Release 同步安装包…'}
-                  />
-                </label>
-              </div>
-
-              <div class="divider"></div>
-
-              <div class="row-item">
-                <div class="row-meta">
-                  <div class="row-label">下载完成后自动启动安装程序并重启升级</div>
-                  <div class="row-desc">
-                    开启后，新版本安装包下载完毕将自动拉起 NSIS / DMG 安装向导，并自动关闭当前旧版 miniBot 完成覆盖升级
-                  </div>
-                </div>
-                <input type="checkbox" class="switch" bind:checked={autoInstallAfterDownload} />
-              </div>
-
-              <!-- 实时下载进度横幅 -->
               {#if downloadingUpdate && updateDlProgress}
                 <div class="dl-banner" style="margin-top: 12px;">
                   <div class="dl-top">
@@ -2415,7 +2364,6 @@
                 </div>
               {/if}
 
-              <!-- 下载完成待安装提示 -->
               {#if downloadedInstallerPath && !downloadingUpdate}
                 <div class="upd-ready-banner">
                   <div class="upd-ready-info">
@@ -2428,74 +2376,24 @@
                     onclick={() => handleRunInstaller()}
                     disabled={installingUpdate}
                   >
-                    {installingUpdate ? '正在启动安装…' : '🚀 立即安装并重启'}
+                    {installingUpdate ? '正在启动安装…' : '立即安装'}
                   </button>
                 </div>
               {/if}
 
               <div class="divider"></div>
 
-              <!-- 主更新操作按钮区 -->
-              <div class="upd-action-bar">
-                {#if updateInfo?.has_update && updateInfo.download_url}
-                  <button
-                    type="button"
-                    class="primary upd-main-btn"
-                    onclick={handleDownloadAndInstallUpdate}
-                    disabled={downloadingUpdate}
-                  >
-                    {#if downloadingUpdate}
-                      正在下载更新包 ({updateDlProgress?.percent ?? 0}%)…
-                    {:else}
-                      ⬇ 立即下载并更新至 v{updateInfo.latest_version}
-                      {updateInfo.asset_size_mb > 0 ? `(${updateInfo.asset_size_mb.toFixed(1)} MB)` : ''}
-                    {/if}
-                  </button>
-                {:else if updateInfo?.download_url}
-                  <button
-                    type="button"
-                    class="act-btn"
-                    onclick={handleDownloadAndInstallUpdate}
-                    disabled={downloadingUpdate}
-                  >
-                    {#if downloadingUpdate}
-                      正在下载安装包 ({updateDlProgress?.percent ?? 0}%)…
-                    {:else}
-                      ⬇ 重新下载当前版本安装包 ({updateInfo.asset_name})
-                    {/if}
-                  </button>
-                  <span class="dim">当前安装的 v{info?.version ?? '0.1.0'} 已是 GitHub 上的最新发布版本。</span>
-                {:else}
-                  <span class="dim">
-                    当前版本 v{info?.version ?? '0.1.0'}。当 GitHub Releases 发布新版本后，此处将显示一键下载与自动升级按钮。
-                  </span>
-                {/if}
-              </div>
-            </div>
-          </section>
-
-          <!-- 2. 版本更新说明 (Release Notes) -->
-          <section class="group">
-            <div class="group-title">
-              版本更新日志 · {updateInfo?.release_name || `miniBot v${info?.version ?? '0.1.0'}`}
-            </div>
-            <div class="card">
-              <pre class="upd-notes selectable">{updateInfo?.release_notes || '暂无更新说明，点击上方「检查更新」获取最新 Release 日志。'}</pre>
-            </div>
-          </section>
-
-          <!-- 3. 开发者自动化发版说明 -->
-          <section class="group">
-            <div class="group-title">Git 自动化打包与发版指南</div>
-            <div class="card">
-              <div class="row-desc" style="line-height: 1.7;">
-                本项目已接入 <b>GitHub Actions 双端（Windows .exe + macOS .dmg）自动构建与 Release 发布流水线</b>。当您需要发布新版本供所有用户在线检测更新时，只需在项目根目录执行一键发版命令：
-              </div>
-              <div class="preview-box mono selectable" style="margin-top: 8px;">
-                # 自动递增补丁版本号 (如 0.1.0 -&gt; 0.1.1)，同步修改三处配置、打 Tag 并推送到 GitHub 触发打包：<br />
-                powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1 patch "优化体验与修复问题"<br /><br />
-                # 或指定具体版本号发布 (如 0.2.0)：<br />
-                powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1 0.2.0 "新增重要特性"
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">GitHub 地址</div>
+                </div>
+                <button
+                  type="button"
+                  class="link-inline"
+                  onclick={() => ipc.openExternalUrl('https://github.com/xiao-ge008/miniBot')}
+                >
+                  https://github.com/xiao-ge008/miniBot
+                </button>
               </div>
             </div>
           </section>
@@ -2675,25 +2573,14 @@
     color: var(--fg-dim);
     border: 1px solid var(--border);
   }
-  .upd-sub {
-    font-size: 12px;
-    color: var(--fg-dim);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
   .link-inline {
     background: none;
     border: none;
     padding: 0;
     color: var(--accent);
-    font-size: 12px;
+    font-size: 12.5px;
     cursor: pointer;
     text-decoration: underline;
-  }
-  .upd-dot {
-    opacity: 0.5;
   }
   .upd-hero-actions {
     display: flex;
@@ -2726,29 +2613,6 @@
     font-size: 11.5px;
     color: var(--fg-dim);
     word-break: break-all;
-  }
-  .upd-action-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .upd-main-btn {
-    padding: 8px 18px;
-    font-size: 13.5px;
-    font-weight: 600;
-    border-radius: 8px;
-  }
-  .upd-notes {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--app-font);
-    font-size: 13px;
-    line-height: 1.65;
-    color: var(--fg);
-    max-height: 260px;
-    overflow-y: auto;
   }
 
   /* 右侧内容列 */

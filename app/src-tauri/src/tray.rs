@@ -12,6 +12,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let hk = app.state::<crate::AppState>().settings.get().hotkeys;
     let status = MenuItem::with_id(app, "status", "⚪ 模型：未加载", false, None::<&str>)?;
     let capture = MenuItem::with_id(app, "capture", format!("📷 截图\t{}", hk.capture), true, None::<&str>)?;
+    let record = MenuItem::with_id(app, "record", format!("🔴 录屏\t{}", hk.record), true, None::<&str>)?;
     let launcher = MenuItem::with_id(app, "launcher", format!("💬 AI 聊天\t{}", hk.launcher), true, None::<&str>)?;
     let color = MenuItem::with_id(app, "color", format!("🎨 取色\t{}", hk.color), true, None::<&str>)?;
     let qr = MenuItem::with_id(app, "qr", "▣ 生成二维码", true, None::<&str>)?;
@@ -24,7 +25,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let sep = || PredefinedMenuItem::separator(app);
     let menu = Menu::with_items(
         app,
-        &[&status, &sep()?, &capture, &launcher, &color, &qr, &localsend, &history, &sep()?, &tip, &release, &settings, &quit],
+        &[&status, &sep()?, &capture, &record, &launcher, &color, &qr, &localsend, &history, &sep()?, &tip, &release, &settings, &quit],
     )?;
     let _ = STATUS_ITEM.set(status);
     let _ = TIP_ITEM.set(tip);
@@ -38,6 +39,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let app = app.clone();
             match e.id().as_ref() {
                 "capture" => crate::actions::trigger(&app, "capture"),
+                "record" => crate::actions::trigger(&app, "record"),
                 "launcher" => crate::actions::trigger(&app, "launcher"),
                 "color" => crate::actions::trigger(&app, "color"),
                 "qr" => crate::wins::open_qr(&app, String::new()),

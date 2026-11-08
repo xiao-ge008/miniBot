@@ -98,6 +98,7 @@ pub fn register(app: &AppHandle) -> Vec<String> {
     let mut errors = vec![];
     for (action, key, label) in [
         ("capture", &hk.capture, "区域截图识别"),
+        ("record", &hk.record, "屏幕录制"),
         ("launcher", &hk.launcher, "呼出 AI 聊天框"),
         ("selection", &hk.selection, "处理当前选中文字"),
         ("color", &hk.color, "屏幕取色器"),

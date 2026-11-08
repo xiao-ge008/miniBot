@@ -97,6 +97,7 @@ pub fn save_settings(app: AppHandle, st: State<AppState>, mut settings: Settings
     use tauri::Emitter;
     settings.hotkeys.launcher = crate::hotkeys::normalize_shortcut(&settings.hotkeys.launcher);
     settings.hotkeys.capture = crate::hotkeys::normalize_shortcut(&settings.hotkeys.capture);
+    settings.hotkeys.record = crate::hotkeys::normalize_shortcut(&settings.hotkeys.record);
     settings.hotkeys.selection = crate::hotkeys::normalize_shortcut(&settings.hotkeys.selection);
     settings.hotkeys.color = crate::hotkeys::normalize_shortcut(&settings.hotkeys.color);
     let old = st.settings.get();
@@ -792,4 +793,50 @@ pub fn open_external_url(app: AppHandle, url: String) -> R<()> {
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_url(url, None::<&str>).map_err(e)
 }
+
+// ---------- 极简双端录屏 ----------
+
+#[tauri::command]
+pub fn recorder_start(
+    app: AppHandle,
+    args: crate::recorder::RecordStartArgs,
+) -> R<crate::recorder::RecorderStateInfo> {
+    crate::recorder::start_recording(&app, args)
+}
+
+#[tauri::command]
+pub fn recorder_pause(app: AppHandle) -> R<crate::recorder::RecorderStateInfo> {
+    crate::recorder::pause_recording(&app)
+}
+
+#[tauri::command]
+pub fn recorder_resume(app: AppHandle) -> R<crate::recorder::RecorderStateInfo> {
+    crate::recorder::resume_recording(&app)
+}
+
+#[tauri::command]
+pub fn recorder_stop(app: AppHandle) -> R<crate::recorder::RecorderStateInfo> {
+    crate::recorder::stop_recording(&app)
+}
+
+#[tauri::command]
+pub fn recorder_cancel(app: AppHandle) -> R<()> {
+    crate::recorder::cancel_recording(&app)
+}
+
+#[tauri::command]
+pub fn recorder_status() -> crate::recorder::RecorderStateInfo {
+    crate::recorder::get_status()
+}
+
+#[tauri::command]
+pub fn recorder_reveal(path: String) -> R<()> {
+    crate::recorder::reveal_video_in_folder(&path)
+}
+
+#[tauri::command]
+pub fn recorder_copy_file(app: AppHandle, path: String) -> R<()> {
+    crate::recorder::copy_video_file_to_clipboard(&app, &path)
+}
+
 

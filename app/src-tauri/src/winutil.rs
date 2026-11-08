@@ -275,6 +275,70 @@ mod imp {
         }
     }
 
+    /// 设置窗口是否在屏幕捕获/录屏中隐身（WDA_EXCLUDEFROMCAPTURE = 0x11），防止录屏控制条被录进视频
+    pub fn set_exclude_from_capture(hwnd: isize, exclude: bool) {
+        if hwnd == 0 {
+            return;
+        }
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+        };
+        unsafe {
+            let h = HWND(hwnd as *mut _);
+            let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+            let _ = SetWindowDisplayAffinity(h, affinity);
+        }
+    }
+
+    /// 将窗口设置为鼠标事件完全穿透 + 不抢焦点 + 工具窗口 + 置顶（用于录屏选区高亮边框）
+    pub fn make_click_through(hwnd: isize) {
+        if hwnd == 0 {
+            return;
+        }
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        };
+        unsafe {
+            let h = HWND(hwnd as *mut _);
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            SetWindowLongPtrW(
+                h,
+                GWL_EXSTYLE,
+                ex | (WS_EX_TRANSPARENT.0
+                    | WS_EX_LAYERED.0
+                    | WS_EX_NOACTIVATE.0
+                    | WS_EX_TOOLWINDOW.0
+                    | WS_EX_TOPMOST.0) as isize,
+            );
+        }
+    }
+
+    /// 精准定位、调整尺寸并显示鼠标穿透防穿帮窗口（用于录屏选区高亮边框）
+    pub fn show_click_through_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+        if hwnd == 0 {
+            return;
+        }
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+        };
+        make_click_through(hwnd);
+        set_exclude_from_capture(hwnd, true);
+        unsafe {
+            let hw = HWND(hwnd as *mut _);
+            let _ = SetWindowPos(
+                hw,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                w.max(16),
+                h.max(16),
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = ShowWindow(hw, SW_SHOWNOACTIVATE);
+        }
+    }
+
     /// 通知 Windows Explorer 刷新当前可执行文件及快捷方式的图标缓存（解决覆盖安装后仍显示旧图标缓存问题）
     pub fn refresh_shell_icon_cache() {
         use std::os::windows::ffi::OsStrExt;
@@ -575,6 +639,27 @@ mod imp {
 
     pub fn minimize_hwnd(_hwnd: isize) {}
 
+    pub fn set_exclude_from_capture(ns_win_ptr: isize, exclude: bool) {
+        if ns_win_ptr == 0 {
+            return;
+        }
+        with_autorelease_pool(|| unsafe {
+            let sel = sel_registerName(c"setSharingType:".as_ptr());
+            if sel.is_null() {
+                return;
+            }
+            let f: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) =
+                std::mem::transmute(objc_msgSend as *const ());
+            // NSWindowSharingNone = 0, NSWindowSharingReadOnly = 1
+            let sharing_type: usize = if exclude { 0 } else { 1 };
+            f(ns_win_ptr as *mut c_void, sel, sharing_type);
+        });
+    }
+
+    pub fn make_click_through(_hwnd: isize) {}
+
+    pub fn show_click_through_rect(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32) {}
+
     pub fn refresh_shell_icon_cache() {}
 }
 
@@ -629,6 +714,12 @@ mod imp {
     pub fn hide_hwnd(_hwnd: isize) {}
 
     pub fn minimize_hwnd(_hwnd: isize) {}
+
+    pub fn set_exclude_from_capture(_hwnd: isize, _exclude: bool) {}
+
+    pub fn make_click_through(_hwnd: isize) {}
+
+    pub fn show_click_through_rect(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
     pub fn refresh_shell_icon_cache() {}
 }

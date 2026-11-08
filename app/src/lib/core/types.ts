@@ -146,7 +146,7 @@ export interface Settings {
     result_width: number;
     result_height: number;
   };
-  hotkeys: { capture: string; launcher: string; selection: string; color: string };
+  hotkeys: { capture: string; record: string; launcher: string; selection: string; color: string };
   llm: {
     server_path: string;
     models_dir: string;
@@ -385,4 +385,34 @@ export interface UpdateDownloadProgress {
   saved_path: string;
   message: string;
 }
+
+export interface RecordStartArgs {
+  monitor_x: number;
+  monitor_y: number;
+  monitor_w: number;
+  monitor_h: number;
+  scale: number;
+  crop_x: number;
+  crop_y: number;
+  crop_w: number;
+  crop_h: number;
+  fps: number;
+  system_audio: boolean;
+  mic_audio: boolean;
+  capture_cursor: boolean;
+}
+
+export interface RecorderStateInfo {
+  status: 'idle' | 'recording' | 'paused' | 'saving' | 'done' | 'error' | string;
+  elapsed_ms: number;
+  fps: number;
+  width: number;
+  height: number;
+  system_audio: boolean;
+  mic_audio: boolean;
+  output_path: string;
+  file_size_bytes: number;
+  error?: string | null;
+}
+
 

@@ -6,6 +6,14 @@ use tauri::{AppHandle, Manager};
 pub fn trigger(app: &AppHandle, name: &str) {
     match name {
         "capture" => crate::capture::start(app, "capture"),
+        "record" => {
+            let st = crate::recorder::get_status();
+            if st.status == "recording" || st.status == "paused" {
+                let _ = crate::recorder::stop_recording(app);
+            } else {
+                crate::capture::start(app, "record");
+            }
+        }
         "capture_chat" => {
             if let Some(w) = app.get_webview_window("launcher") {
                 let _ = w.hide();

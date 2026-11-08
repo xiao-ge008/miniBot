@@ -24,6 +24,8 @@ import type {
   OcrResult,
   Payload,
   QrResult,
+  RecorderStateInfo,
+  RecordStartArgs,
   ScannedFolderResult,
   SearchHit,
   SearchResponse,
@@ -186,6 +188,15 @@ export const ipc = {
   appCancelUpdateDownload: () => invoke<void>('app_cancel_update_download'),
   appInstallUpdate: (installerPath: string) => invoke<void>('app_install_update', { installerPath }),
   openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
+
+  recorderStart: (args: RecordStartArgs) => invoke<RecorderStateInfo>('recorder_start', { args }),
+  recorderPause: () => invoke<RecorderStateInfo>('recorder_pause'),
+  recorderResume: () => invoke<RecorderStateInfo>('recorder_resume'),
+  recorderStop: () => invoke<RecorderStateInfo>('recorder_stop'),
+  recorderCancel: () => invoke<void>('recorder_cancel'),
+  recorderStatus: () => invoke<RecorderStateInfo>('recorder_status'),
+  recorderReveal: (path: string) => invoke<void>('recorder_reveal', { path }),
+  recorderCopyFile: (path: string) => invoke<void>('recorder_copy_file', { path }),
 };
 
 /** 订阅本窗口的 Payload 投递：挂载时取一次，之后每次投递再取 */
@@ -216,6 +227,10 @@ export function onOutsideClick(cb: () => void) {
 
 export function onTtsEvent(cb: (data: { action: string; id?: string; token?: string }) => void) {
   return listen<{ action: string; id?: string; token?: string }>('minibot://tts', (e) => cb(e.payload));
+}
+
+export function onRecorderState(cb: (s: RecorderStateInfo) => void) {
+  return listen<RecorderStateInfo>('minibot://recorder-state', (e) => cb(e.payload));
 }
 
 /** 默认关闭自动联网搜索 */

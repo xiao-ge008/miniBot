@@ -16,6 +16,7 @@ mod localsend;
 mod ocr;
 mod payload;
 mod qr;
+mod recorder;
 mod settings;
 mod tray;
 mod tts;
@@ -228,6 +229,14 @@ pub fn run() {
             commands::app_cancel_update_download,
             commands::app_install_update,
             commands::open_external_url,
+            commands::recorder_start,
+            commands::recorder_pause,
+            commands::recorder_resume,
+            commands::recorder_stop,
+            commands::recorder_cancel,
+            commands::recorder_status,
+            commands::recorder_reveal,
+            commands::recorder_copy_file,
         ])
         .build(tauri::generate_context!())
         .expect("miniBot 启动失败");

@@ -172,49 +172,76 @@ fn format_published_at(raw: &str) -> String {
     raw.chars().take(16).collect::<String>().replace('T', " ")
 }
 
-/// 检查 GitHub Releases 最新版本
+/// 检查 GitHub Releases 最新版本（默认优先走代理加速线路，代理不通时自动回退 GitHub 官方线路）
 pub async fn check_update(current_ver: &str) -> Result<UpdateInfo, String> {
     let cur = clean_version(current_ver);
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(10))
         .user_agent(format!("miniBot-Updater/{cur}"))
         .build()
         .map_err(|e| format!("初始化网络客户端失败：{e}"))?;
 
-    let latest_api = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let list_api = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=5");
+    let latest_raw = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let latest_urls = [
+        format!("https://gh-proxy.org/{latest_raw}"),
+        format!("https://gh-proxy.com/{latest_raw}"),
+        latest_raw,
+    ];
 
-    // 1. 优先请求 /releases/latest
+    // 1. 优先请求 /releases/latest（先走代理网络，不通再走 GitHub 官方线路）
     let mut release_json: Option<serde_json::Value> = None;
-    if let Ok(resp) = client
-        .get(&latest_api)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-    {
-        if resp.status().is_success() {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                release_json = Some(v);
-            }
-        }
-    }
-
-    // 2. 若无 latest（例如只有 pre-release 或首次正在构建），回退查询 /releases 列表
-    if release_json.is_none() {
+    for url in &latest_urls {
         if let Ok(resp) = client
-            .get(&list_api)
+            .get(url)
             .header("Accept", "application/vnd.github+json")
             .send()
             .await
         {
             if resp.status().is_success() {
-                if let Ok(arr) = resp.json::<Vec<serde_json::Value>>().await {
-                    release_json = arr.into_iter().next();
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    if v.get("tag_name").and_then(|t| t.as_str()).is_some() {
+                        release_json = Some(v);
+                        break;
+                    }
                 }
-            } else if resp.status().as_u16() == 403 {
-                return Err("GitHub API 访问频率受限，请稍后再试或直接前往 GitHub Releases 页面查看".into());
             }
+        }
+    }
+
+    // 2. 若无 latest（例如只有 pre-release 或首次正在构建），回退查询 /releases 列表（同样先走代理后走官方）
+    if release_json.is_none() {
+        let list_raw = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=5");
+        let list_urls = [
+            format!("https://gh-proxy.org/{list_raw}"),
+            format!("https://gh-proxy.com/{list_raw}"),
+            list_raw,
+        ];
+        let mut rate_limited = false;
+        for url in &list_urls {
+            if let Ok(resp) = client
+                .get(url)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(arr) = resp.json::<Vec<serde_json::Value>>().await {
+                        if let Some(first) = arr
+                            .into_iter()
+                            .find(|v| v.get("tag_name").and_then(|t| t.as_str()).is_some())
+                        {
+                            release_json = Some(first);
+                            break;
+                        }
+                    }
+                } else if resp.status().as_u16() == 403 {
+                    rate_limited = true;
+                }
+            }
+        }
+        if release_json.is_none() && rate_limited {
+            return Err("GitHub API 访问频率受限，请稍后再试或直接前往 GitHub 查看".into());
         }
     }
 
@@ -288,15 +315,16 @@ pub async fn check_update(current_ver: &str) -> Result<UpdateInfo, String> {
     })
 }
 
-/// 构造候选下载 URL 列表（开启国内加速时优先尝试高速镜像，失败自动回退官方源）
+/// 构造候选下载 URL 列表（默认优先走代理网络，代理不通时自动回退 GitHub 官方源）
 fn candidate_download_urls(raw_url: &str, use_mirror: bool) -> Vec<String> {
     let u = raw_url.trim();
     if !use_mirror || !u.starts_with("https://github.com/") {
         return vec![u.to_string()];
     }
     vec![
-        format!("https://ghfast.top/{u}"),
+        format!("https://gh-proxy.org/{u}"),
         format!("https://gh-proxy.com/{u}"),
+        format!("https://ghfast.top/{u}"),
         u.to_string(),
     ]
 }

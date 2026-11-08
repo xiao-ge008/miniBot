@@ -48,17 +48,17 @@
     const unS = onLlmStatus((s) => (status = s));
     ipc.llmStatus().then((s) => (status = s));
     const unO = onOutsideClick(() => {
-      if (!pinned && Date.now() - openedAt > 200) {
+      if (!pinned && Date.now() - openedAt > 450) {
         close();
       }
     });
-    // 失去焦点自动隐藏（未固定且打开超过 280ms）
+    // 失去焦点自动隐藏（未固定且打开超过 500ms）
     const unF = win.onFocusChanged(({ payload: focused }) => {
       if (focused) {
         openedAt = Date.now();
         return;
       }
-      if (!pinned && Date.now() - openedAt > 280) {
+      if (!pinned && Date.now() - openedAt > 500) {
         setTimeout(async () => {
           try {
             const stillFocused = await win.isFocused();

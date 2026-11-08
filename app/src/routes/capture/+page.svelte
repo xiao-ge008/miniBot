@@ -643,8 +643,14 @@
         break;
       }
       default:
+        phase = 'idle';
+        sel = null;
+        shapes = [];
+        tool = null;
+        textEdit = null;
+        sizeEdit = false;
+        beautify = false;
         await execute(id, imagePayload(data));
-        close();
     }
   }
 
@@ -689,7 +695,7 @@
     else if (e.ctrlKey && key === 'z' && !e.shiftKey) undo();
     else if (e.ctrlKey && (key === 'y' || (key === 'z' && e.shiftKey))) redo();
     else if (e.ctrlKey && key === 'c' && sel) act('copy');
-    else if (e.key === 'Enter' && sel) act(mode === 'chat' ? 'send_chat' : 'copy');
+    else if (e.key === 'Enter' && sel) act(mode === 'chat' ? 'attach_chat' : 'copy');
     else if (key === 'c' && !e.ctrlKey) copyColor(e.shiftKey);
     else if (key === 'f' && mode !== 'color') {
       sel = { x: 0, y: 0, w: W, h: H };
@@ -855,7 +861,7 @@
     onmousedown={onDown}
     onmousemove={onMove}
     onmouseup={onUp}
-    ondblclick={() => sel && !tool && act(mode === 'chat' ? 'send_chat' : 'copy')}
+    ondblclick={() => sel && !tool && act(mode === 'chat' ? 'attach_chat' : 'copy')}
     oncontextmenu={onContext}
   ></canvas>
 
@@ -952,16 +958,15 @@
         <button class="tb" title="重做 Ctrl+Y" onclick={redo}>↷</button>
         <span class="sep"></span>
         {#if mode === 'chat'}
-          <button class="tb label-tb" title="将截图放入聊天输入框（可补充文字后再发）" onclick={() => act('attach_chat')}>📎 放入输入</button>
-          <button class="tb label-tb ok" title="将截图直接发送到当前聊天 (Enter / 双击)" onclick={() => act('send_chat')}>↑ 发送聊天</button>
+          <button class="tb label-tb ok" title="将截图放入聊天输入框（补充问题后点发送，Enter / 双击）" onclick={() => act('attach_chat')}>📎 放入输入</button>
+          <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
           <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>📡 局域网发送</button>
           <button class="tb" title="取消并返回聊天 Esc" onclick={close}>✕</button>
         {:else}
           <button class="tb label-tb" title="智能识别图片内容" onclick={() => act('auto')}>识图</button>
           <button class="tb label-tb" title="提取文字 (OCR)" onclick={() => act('ocr')}>文字</button>
           <button class="tb label-tb" title="截图翻译" onclick={() => act('translate')}>翻译</button>
-          <button class="tb label-tb" title="针对截图问答" onclick={() => act('qa')}>问答</button>
-          <button class="tb label-tb" title="发送到主 AI 聊天窗" onclick={() => act('send_chat')}>发送聊天</button>
+          <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
           {#if qrCount > 0}
             <button class="tb label-tb hot" title={`已识别 ${qrCount} 个二维码`} onclick={() => act('qr')}>二维码</button>
           {/if}

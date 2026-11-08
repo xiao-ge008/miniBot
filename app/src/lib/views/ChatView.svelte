@@ -41,12 +41,58 @@
   let askBox = $state<HTMLTextAreaElement>();
   let copied = $state(false);
 
-  const isLauncher = $derived(payload.origin === 'launcher');
+  const isPolish = $derived(agent.id === 'polish');
+  const isImageQa = $derived(!!payload.image && !inputText);
   const canReplace = $derived(
     !!agent.replace && payload.source_hwnd !== 0 && (payload.origin === 'selection' || payload.origin === 'clipboard'),
   );
   const busy = $derived(stage === 'ocr' || stage === 'loading' || stage === 'streaming');
   $effect(() => onbusy(busy));
+
+  const QUICK_POLISH: { label: string; prompt: string }[] = [
+    { label: '✨ 流畅润色', prompt: '润色词句使其通顺自然、表达地道流畅，保持原意不变' },
+    { label: '🏛️ 更正式专业', prompt: '改写为更正式、得体、专业的书面语或商务表达风格' },
+    { label: '💬 更口语自然', prompt: '改写为亲切自然的日常口语化表达，通俗易懂' },
+    { label: '✂️ 精简凝练', prompt: '删繁就简，去除冗余啰嗦词句，保留核心意思并压缩篇幅' },
+    { label: '📝 扩充细节', prompt: '适当丰富细节与层次过渡，使表达更饱满有力' },
+    { label: '🔧 纠错改病句', prompt: '仅修正错别字、语法语病与标点符号，最大限度保留原文原貌' },
+  ];
+
+  const QUICK_TEXT_QA: { label: string; prompt: string }[] = [
+    { label: '💡 解释核心意思', prompt: '请用通俗简练的话解释这段内容的核心意思' },
+    { label: '📋 提炼关键要点', prompt: '请分条提炼这段内容的关键要点' },
+    { label: '🔍 分析逻辑与问题', prompt: '请深入分析这段内容的逻辑结构、背景或潜在问题' },
+    { label: '📝 一句话总结', prompt: '请用一句话精准概括这段内容的核心结论' },
+    { label: '🌐 翻译并解读术语', prompt: '请翻译这段内容，并解释其中的重点词汇或专业术语' },
+  ];
+
+  const QUICK_IMAGE_QA: { label: string; prompt: string }[] = [
+    { label: '🖼️ 解读图片内容', prompt: '请详细描述并解读这张截图中的核心内容与关键信息' },
+    { label: '📝 提取并整理文字', prompt: '请提取图片中的全部文字，并按清晰的层级排版整理' },
+    { label: '💡 解答图中问题/报错', prompt: '请分析图片中的问题、报错或题目，并给出详细解答与解决步骤' },
+    { label: '📊 总结图表/数据要点', prompt: '请提炼图片中图表、表格或界面的关键数据与核心结论' },
+    { label: '🌐 翻译图中文字', prompt: '请将图片中的外文内容准确翻译为简体中文' },
+  ];
+
+  const quickOptions = $derived(isPolish ? QUICK_POLISH : isImageQa ? QUICK_IMAGE_QA : QUICK_TEXT_QA);
+  const askGuideTitle = $derived(
+    isPolish
+      ? '✍️ 请选择润色优化方向，或在下方输入您的修改意见：'
+      : isImageQa
+        ? '💬 请选择针对当前截图的提问方向，或在下方输入您的问题：'
+        : '💬 请选择针对当前段落的提问方向，或在下方输入您的问题：',
+  );
+  const askPlaceholder = $derived(
+    stage === 'ask'
+      ? isPolish
+        ? '输入您的具体润色意见（如：语气委婉些 / 改成邮件格式），回车或点发送…'
+        : isImageQa
+          ? '输入针对当前截图想问的问题，回车或点击发送…'
+          : '输入针对当前段落想问的问题，回车或点击发送…'
+      : isPolish
+        ? '继续输入修改意见，回车或点击发送…'
+        : '继续追问，回车或点击发送…',
+  );
 
   /** 拆分 <think>...</think> 思考过程与正式回答 */
   function splitThink(raw: string): { think: string; answer: string; thinking: boolean } {
@@ -98,7 +144,7 @@
 
   async function start(force = false) {
     const qText = question.trim() || curQ;
-    if (agent.chat && !isLauncher && !qText) {
+    if (agent.chat && !qText) {
       stage = 'ask';
       output = '';
       done = [];
@@ -109,17 +155,8 @@
     const input = await prepareText();
     if (!input) return;
     done = [];
-    curQ = agent.chat && !isLauncher ? qText : '';
-    if (agent.chat && isLauncher) {
-      convo = agent.system?.trim()
-        ? [
-            { role: 'system', content: agent.system.trim() },
-            { role: 'user', content: input.text },
-          ]
-        : [{ role: 'user', content: input.text }];
-    } else {
-      convo = buildMessages(agent, payload, { ...input, question: curQ, opts });
-    }
+    curQ = agent.chat ? qText : '';
+    convo = buildMessages(agent, payload, { ...input, question: curQ, opts });
     question = '';
     await stream(force);
   }
@@ -329,12 +366,37 @@
       {/if}
     </div>
 
-    <!-- 问答模式初始快捷建议 -->
+    <!-- 润色 / 问答模式初始方向与快捷选项 -->
     {#if stage === 'ask' && done.length === 0}
-      <div class="quick-prompts">
-        <button class="qp" onclick={() => submitQuestion('请用通俗简练的话解释这段内容')}>解释核心意思</button>
-        <button class="qp" onclick={() => submitQuestion('提炼这段内容的关键要点')}>提炼关键要点</button>
-        <button class="qp" onclick={() => submitQuestion('分析其中的逻辑或潜在问题')}>深入分析</button>
+      <div class="ask-guide">
+        <div class="ask-guide-title">{askGuideTitle}</div>
+        <div class="quick-prompts">
+          {#each quickOptions as opt (opt.label)}
+            <button class="qp" onclick={() => submitQuestion(opt.prompt)} disabled={busy}>
+              {opt.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {:else if isPolish && stage !== 'ask'}
+      <!-- 润色已出结果后，仍可一键切换其他润色方向（自动重置原文上下文，不污染） -->
+      <div class="quick-prompts compact">
+        {#each QUICK_POLISH as opt (opt.label)}
+          <button
+            class="qp sm"
+            class:active={curQ === opt.prompt}
+            onclick={() => {
+              if (busy) return;
+              question = opt.prompt;
+              curQ = opt.prompt;
+              done = [];
+              start();
+            }}
+            disabled={busy}
+          >
+            {opt.label}
+          </button>
+        {/each}
       </div>
     {/if}
 
@@ -473,7 +535,7 @@
         bind:this={askBox}
         bind:value={question}
         rows="1"
-        placeholder={stage === 'ask' ? '输入问题，回车发送…' : '继续追问，回车发送…'}
+        placeholder={askPlaceholder}
         onkeydown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
             e.preventDefault();
@@ -594,23 +656,52 @@
     overflow: hidden;
   }
 
-  /* 问答快捷建议 */
+  /* 润色与问答快捷建议 */
+  .ask-guide {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+  }
+  .ask-guide-title {
+    font-size: 12px;
+    color: var(--fg-dim);
+    font-weight: 500;
+  }
   .quick-prompts {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
   }
+  .quick-prompts.compact {
+    gap: 5px;
+  }
   .qp {
     font-size: 12px;
-    padding: 3px 10px;
-    border-radius: 12px;
-    background: transparent;
-    color: var(--fg-dim);
-    border: 1px solid var(--border);
-  }
-  .qp:hover {
+    padding: 4px 11px;
+    border-radius: 14px;
+    background: var(--bg-solid);
     color: var(--fg);
-    border-color: var(--fg-dim);
+    border: 1px solid var(--border);
+    transition: all 0.14s ease;
+  }
+  .qp.sm {
+    font-size: 11px;
+    padding: 2px 8px;
+    color: var(--fg-dim);
+  }
+  .qp.active {
+    color: var(--accent-blue);
+    border-color: color-mix(in srgb, var(--accent-blue) 50%, transparent);
+    background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+    font-weight: 500;
+  }
+  .qp:hover:not(:disabled) {
+    color: var(--accent-blue);
+    border-color: color-mix(in srgb, var(--accent-blue) 50%, var(--fg-dim));
     background: var(--hover);
   }
 

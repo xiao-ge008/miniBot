@@ -143,13 +143,11 @@ export const BUILTIN_AGENTS: Agent[] = [
     surfaces: ['tip', 'launcher'],
     order: 40,
     replace: true,
+    chat: true,
     temperature: 0.4,
     reasoning_effort: 'off',
-    system: '你是资深文字编辑。按要求润色改写文本，保持原意与原语言。只输出改写后的正文，不加任何解释。',
-    template: '请对下面的文字做「{{opt.mode}}」处理：\n\n{{text}}',
-    options: [
-      { key: 'mode', label: '方式', choices: ['润色', '精简', '扩写', '更正式', '更口语', '纠错'], default: '润色' },
-    ],
+    system: '你是资深文字编辑。请严格按照用户的润色方向或修改意见改写原文，保持原意与原语言。只输出改写后的正文，不加任何解释。',
+    template: '润色要求：{{question}}\n\n待润色原文：\n"""\n{{text}}\n"""',
   },
   {
     id: 'qa',
@@ -221,7 +219,9 @@ export function buildMessages(
   if (input.image && agent.vision) {
     const prompt = input.text
       ? fillTemplate(agent, { ...input, text: input.text })
-      : fillTemplate(agent, { ...input, text: '（见图片）' });
+      : agent.id === 'qa'
+        ? input.question || '请分析这张图片的内容。'
+        : fillTemplate(agent, { ...input, text: '（见图片）' });
     msgs.push({
       role: 'user',
       content: [

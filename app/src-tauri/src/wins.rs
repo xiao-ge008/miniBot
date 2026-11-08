@@ -191,6 +191,9 @@ pub fn hide(app: &AppHandle, label: &str) {
 pub fn open_result(app: &AppHandle, p: Payload) {
     let app2 = app.clone();
     std::thread::spawn(move || {
+        // 先隐藏全屏 capture 遮罩与 tip 胶囊，避免其隐藏时抢走新弹出的 result 浮窗焦点
+        crate::capture::close(&app2);
+        hide(&app2, "tip");
         let Some(w) = get_or_build(&app2, "result") else { return };
         let was_visible = w.is_visible().unwrap_or(false);
         if !was_visible {
@@ -208,9 +211,6 @@ pub fn open_result(app: &AppHandle, p: Payload) {
         let _ = app2.run_on_main_thread(move || {
             crate::winutil::focus_hwnd(h);
         });
-        // 先显示并聚焦 result，再隐藏 capture/tip，确保 Windows 前台焦点权限平滑移交
-        crate::capture::close(&app2);
-        hide(&app2, "tip");
     });
 }
 

@@ -95,6 +95,41 @@ export interface ChatMessage {
   reasoning_content?: string;
 }
 
+export interface ModelParams {
+  ctx: number;
+  ngl: number;
+  kv_quant: string;
+  idle_secs: number;
+  extra_args: string;
+}
+
+export interface CustomLocalModel {
+  id: string;
+  name: string;
+  desc: string;
+  folder_path: string;
+  model_path: string;
+  mmproj_path: string;
+  vision: boolean;
+  quant_tag: string;
+  size_label: string;
+  params: ModelParams;
+}
+
+export interface ScannedGgufFile {
+  path: string;
+  file_name: string;
+  suggested_name: string;
+  size_label: string;
+  quant_tag: string;
+}
+
+export interface ScannedFolderResult {
+  folder_path: string;
+  models: ScannedGgufFile[];
+  mmprojs: ScannedGgufFile[];
+}
+
 export interface Settings {
   autostart: boolean;
   target_lang: string;
@@ -118,9 +153,13 @@ export interface Settings {
     mirror: string;
     port: number;
     ctx: number;
+    ngl?: number;
+    kv_quant?: string;
     idle_secs: number;
     required_vram_mb: number;
     extra_args: string;
+    model_params?: Record<string, ModelParams>;
+    custom_models?: CustomLocalModel[];
     api_enabled: boolean;
     api_provider: string;
     api_base_url: string;
@@ -210,8 +249,12 @@ export interface ModelCard {
   recommend_reason: string;
   installed: boolean;
   active: boolean;
+  is_custom: boolean;
+  vision: boolean;
+  folder_path: string;
   model_path: string;
   mmproj_path: string;
+  params: ModelParams;
 }
 
 export interface EngineOverview {

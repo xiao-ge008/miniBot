@@ -9,8 +9,12 @@
   import type {
     AppInfo,
     CloudTestResult,
+    CustomLocalModel,
     DownloadProgress,
     EngineOverview,
+    ModelCard,
+    ModelParams,
+    ScannedFolderResult,
     Settings,
     StatusInfo,
     UpdateDownloadProgress,
@@ -181,7 +185,35 @@
   let downloading = $state(false);
   let startingEngine = $state(false);
   let engineBackendChoice = $state('auto');
-  let advOpen = $state(false);
+
+  // 默认模型点击「下载」后展开线路选择（默认 modelscope 线路）
+  let dlRouteOpenId = $state<string | null>(null);
+  let dlRouteChoice = $state<'modelscope' | 'hf-mirror' | 'huggingface'>('modelscope');
+
+  // 每个模型卡片右下角独立的「高级设置」展开状态
+  let expandedAdvModelId = $state<string | null>(null);
+
+  // 用户自定义本地模型（新增 / 编辑）状态
+  let showCustomModelModal = $state(false);
+  let scanningCustomFolder = $state(false);
+  let savingCustomModel = $state(false);
+  let scannedFolder = $state<ScannedFolderResult | null>(null);
+  let customScanError = $state('');
+  let customForm = $state<{
+    id: string;
+    name: string;
+    desc: string;
+    folder_path: string;
+    model_path: string;
+    mmproj_path: string;
+  }>({
+    id: '',
+    name: '',
+    desc: '',
+    folder_path: '',
+    model_path: '',
+    mmproj_path: '',
+  });
 
   // 云端 API 交互状态
   let showApiKey = $state(false);
@@ -436,7 +468,11 @@
       result_height: loaded.ui?.result_height || 460,
     };
     if (!loaded.llm.ctx || loaded.llm.ctx === 20480 || loaded.llm.ctx === 8192) loaded.llm.ctx = 32768;
-    if (!loaded.llm.mirror) loaded.llm.mirror = 'hf-mirror';
+    if (!loaded.llm.mirror) loaded.llm.mirror = 'modelscope';
+    dlRouteChoice =
+      loaded.llm.mirror === 'hf-mirror' || loaded.llm.mirror === 'huggingface'
+        ? loaded.llm.mirror
+        : 'modelscope';
     if (!loaded.llm.api_provider) loaded.llm.api_provider = 'siliconflow';
     if (!loaded.llm.api_base_url) loaded.llm.api_base_url = 'https://api.siliconflow.cn/v1';
     if (!loaded.llm.api_model) loaded.llm.api_model = 'Qwen/Qwen2.5-VL-72B-Instruct';
@@ -616,10 +652,19 @@
     }
   }
 
-  async function handleDownloadModel(modelId: string) {
+  async function handleDownloadModel(modelId: string, mirrorOverride?: string) {
     if (downloading || !s) return;
+    const chosenMirror = mirrorOverride || dlRouteChoice || 'modelscope';
+    s.llm.mirror = chosenMirror;
+    dlRouteOpenId = null;
     downloading = true;
     dlError = '';
+    const routeLabel =
+      chosenMirror === 'modelscope'
+        ? 'ModelScope (魔搭)'
+        : chosenMirror === 'huggingface'
+          ? 'HuggingFace'
+          : '国内镜像 (hf-mirror)';
     dlProgress = {
       target: modelId,
       stage: 'downloading',
@@ -627,10 +672,10 @@
       downloaded_mb: 0,
       total_mb: 0,
       percent: 1,
-      message: '正在连接模型镜像源…',
+      message: `正在通过 ${routeLabel} 线路连接下载源…`,
     };
     try {
-      overview = await ipc.engineDownloadModel(modelId, s.llm.mirror || 'hf-mirror', (p) => {
+      overview = await ipc.engineDownloadModel(modelId, chosenMirror, (p) => {
         dlProgress = p;
       });
       s = await ipc.getSettings();
@@ -651,30 +696,159 @@
     try {
       overview = await ipc.engineActivateModel(modelId);
       s = await ipc.getSettings();
-      flashMsg('✓ 已切换当前使用的模型');
+      flashMsg('✓ 已切换当前使用的模型及专属参数');
     } catch (e) {
       flashMsg(`切换失败：${e}`);
     }
   }
 
-  async function handlePickModelsDir() {
-    if (downloading) return;
+  function formatCtxLabel(ctx?: number): string {
+    const c = ctx || 32768;
+    if (c === 100128) return '100K';
+    return `${Math.round(c / 1024)}K`;
+  }
+
+  function buildModelTip(m: ModelCard): string {
+    const lines: string[] = [];
+    if (m.id === 'q4m') {
+      lines.push('定位：默认均衡视觉模型（显存 ≥ 4GB 推荐）');
+    } else if (m.id === 'q2s') {
+      lines.push('定位：默认轻量视觉模型（< 4GB 显存 / 核显 / CPU 推荐）');
+    } else {
+      lines.push('定位：用户自定义本地 GGUF 模型');
+    }
+    if (m.model_path) {
+      lines.push(`主模型：${m.model_path}`);
+    }
+    if (m.mmproj_path) {
+      lines.push(`视觉组件：${m.mmproj_path.split(/[\\/]/).pop()}`);
+    } else {
+      lines.push('视觉组件：无（识图自动调用内置离线 OCR）');
+    }
+    return lines.join('\n');
+  }
+
+  async function handleSaveModelParams(m: ModelCard) {
     try {
-      const res = await ipc.enginePickModelsDir();
-      if (!res) return;
-      const [newOv, movedCount] = res;
-      overview = newOv;
+      const cleanParams: ModelParams = {
+        ctx: Number(m.params.ctx) || 32768,
+        ngl: Number(m.params.ngl ?? 99),
+        kv_quant: m.params.kv_quant || 'q8_0',
+        idle_secs: Math.max(30, Number(m.params.idle_secs) || 180),
+        extra_args: (m.params.extra_args || '').trim(),
+      };
+      overview = await ipc.engineUpdateModelParams(m.id, cleanParams);
       s = await ipc.getSettings();
-      const installedCount = newOv.models.filter((m) => m.installed).length;
-      if (movedCount > 0) {
-        flashMsg(`✓ 已更换位置并自动迁移 ${movedCount} 个模型文件`, 3500);
-      } else if (installedCount > 0) {
-        flashMsg(`✓ 已切换存储位置，成功识别 ${installedCount} 个本地模型`, 3500);
+      flashMsg(`✓ 已保存「${m.name}」的独立参数`);
+    } catch (e) {
+      flashMsg(`保存模型参数失败：${e}`, 3500);
+    }
+  }
+
+  function openAddCustomModel() {
+    customScanError = '';
+    scannedFolder = null;
+    customForm = {
+      id: '',
+      name: '',
+      desc: '',
+      folder_path: '',
+      model_path: '',
+      mmproj_path: '',
+    };
+    showCustomModelModal = true;
+  }
+
+  function openEditCustomModel(m: ModelCard) {
+    customScanError = '';
+    scannedFolder = null;
+    customForm = {
+      id: m.id,
+      name: m.name,
+      desc: m.desc,
+      folder_path: m.folder_path || '',
+      model_path: m.model_path,
+      mmproj_path: m.mmproj_path || '',
+    };
+    showCustomModelModal = true;
+  }
+
+  async function handleScanCustomFolder() {
+    if (scanningCustomFolder) return;
+    scanningCustomFolder = true;
+    customScanError = '';
+    try {
+      const res = await ipc.engineScanCustomFolder();
+      if (!res) return;
+      scannedFolder = res;
+      customForm.folder_path = res.folder_path;
+      if (res.models.length > 0) {
+        const first = res.models[0];
+        customForm.model_path = first.path;
+        if (!customForm.name.trim()) {
+          customForm.name = first.suggested_name;
+        }
       } else {
-        flashMsg('✓ 模型存储位置已更新', 3500);
+        customForm.model_path = '';
+        customScanError = '所选文件夹下未检测到 .gguf 模型文件，请重新选择';
+      }
+      if (res.mmprojs.length > 0) {
+        customForm.mmproj_path = res.mmprojs[0].path;
+      } else {
+        customForm.mmproj_path = '';
       }
     } catch (e) {
-      flashMsg(`修改目录失败：${e}`, 3500);
+      customScanError = `扫描文件夹失败：${e}`;
+    } finally {
+      scanningCustomFolder = false;
+    }
+  }
+
+  async function handleSaveCustomModel() {
+    if (!customForm.model_path.trim()) {
+      customScanError = '请先点击「选择文件夹」识别本地 .gguf 模型文件';
+      return;
+    }
+    savingCustomModel = true;
+    customScanError = '';
+    try {
+      const payload: CustomLocalModel = {
+        id: customForm.id,
+        name: customForm.name.trim(),
+        desc: customForm.desc.trim(),
+        folder_path: customForm.folder_path.trim(),
+        model_path: customForm.model_path.trim(),
+        mmproj_path: customForm.mmproj_path.trim(),
+        vision: Boolean(customForm.mmproj_path.trim()),
+        quant_tag: '',
+        size_label: '',
+        params: {
+          ctx: 32768,
+          ngl: 99,
+          kv_quant: 'q8_0',
+          idle_secs: 180,
+          extra_args: '',
+        },
+      };
+      overview = await ipc.engineSaveCustomModel(payload);
+      s = await ipc.getSettings();
+      showCustomModelModal = false;
+      flashMsg('✓ 已保存自定义本地模型');
+    } catch (e) {
+      customScanError = String(e);
+    } finally {
+      savingCustomModel = false;
+    }
+  }
+
+  async function handleDeleteCustomModel(m: ModelCard) {
+    try {
+      overview = await ipc.engineDeleteCustomModel(m.id);
+      s = await ipc.getSettings();
+      if (expandedAdvModelId === m.id) expandedAdvModelId = null;
+      flashMsg(`✓ 已从列表移除「${m.name}」`);
+    } catch (e) {
+      flashMsg(`移除失败：${e}`);
     }
   }
 
@@ -837,7 +1011,7 @@
         {#each errors as e (e)}<div class="alert">{e}</div>{/each}
 
         {#if tab === '模型'}
-          <!-- 顶部二级 Tab 切换：默认「本地模型」，第二个「模型 API」 -->
+          <!-- 顶部二级 Tab 切换：极简风格 -->
           <div class="subtab-bar">
             <div class="subtab-group">
               <button
@@ -848,7 +1022,7 @@
               >
                 <span>⚡ 本地模型</span>
                 {#if !s.llm.api_enabled}
-                  <span class="subtab-pill ok">当前生效</span>
+                  <span class="active-dot" title="当前生效"></span>
                 {/if}
               </button>
               <button
@@ -862,69 +1036,61 @@
               >
                 <span>☁️ 模型 API</span>
                 {#if s.llm.api_enabled}
-                  <span class="subtab-pill ok">当前生效</span>
-                {:else}
-                  <span class="subtab-pill">支持低配/无显卡机器</span>
+                  <span class="active-dot" title="当前生效"></span>
                 {/if}
               </button>
             </div>
 
             <div class="subtab-hint">
               {#if s.llm.api_enabled}
-                <span class="mode-indicator cloud">☁️ 已启用云端 API：{s.llm.api_model || '未指定模型'}</span>
+                <span class="mode-indicator cloud">☁️ API · {s.llm.api_model || '未指定'}</span>
               {:else}
-                <span class="mode-indicator local">🖥 当前使用：本地离线引擎</span>
+                <span class="mode-indicator local">🖥 本地离线引擎</span>
               {/if}
             </div>
           </div>
 
           {#if modelSubTab === 'local'}
-            <!-- 若本机无独立显卡且 CPU/内存较低，提醒可一键切换至「模型 API」使用云端模型 -->
+            <!-- 低配提醒或云端启用状态：单行极简横幅 + 问号悬浮详情 -->
             {#if overview?.hardware.low_end_device && !s.llm.api_enabled}
-              <div class="hw-recommend-banner">
-                <div class="hwr-main">
-                  <div class="hwr-title">💡 检测到本机无独立显卡或处理器配置偏低</div>
-                  <div class="hwr-desc">{overview.hardware.low_end_reason}</div>
+              <div class="hw-recommend-banner compact">
+                <div class="hwr-inline">
+                  <span class="hwr-title">💡 检测到本机配置偏低，推荐使用云端 API</span>
+                  <span class="help-tip" data-tip={overview.hardware.low_end_reason}>?</span>
                 </div>
-                <button
-                  type="button"
-                  class="act-btn light"
-                  onclick={() => (modelSubTab = 'api')}
-                >
-                  去开启模型 API →
+                <button type="button" class="act-btn light sm" onclick={() => (modelSubTab = 'api')}>
+                  开启模型 API →
                 </button>
               </div>
             {:else if s.llm.api_enabled}
-              <div class="cloud-active-banner">
-                <div class="hwr-main">
-                  <div class="hwr-title">☁️ 当前正在使用「模型 API」云端模型（{s.llm.api_model}）</div>
-                  <div class="hwr-desc">
-                    本地推理引擎已自动待命，不占用任何本机显存与 CPU。如需改回本地离线模型，可点击右侧按钮切换。
-                  </div>
+              <div class="cloud-active-banner compact">
+                <div class="hwr-inline">
+                  <span class="hwr-title">☁️ 当前生效：模型 API（{s.llm.api_model}）</span>
+                  <span
+                    class="help-tip"
+                    data-tip="本地推理引擎已自动待命（0 显存与 CPU 占用）。点击右侧按钮可随时切回本地离线模型。"
+                    >?</span
+                  >
                 </div>
                 <div class="engine-dl-group">
                   <button
                     type="button"
-                    class="act-btn"
+                    class="act-btn sm"
                     onclick={() => {
                       s!.llm.api_enabled = false;
                       save();
                     }}
                   >
-                    切回本地模型
+                    切回本地
                   </button>
-                  <button
-                    type="button"
-                    class="act-btn light"
-                    onclick={() => (modelSubTab = 'api')}
-                  >
-                    配置模型 API →
+                  <button type="button" class="act-btn light sm" onclick={() => (modelSubTab = 'api')}>
+                    API 设置 →
                   </button>
                 </div>
               </div>
             {/if}
 
-            <!-- 1. 本地运行时 / 推理引擎 -->
+            <!-- 1. 本地运行时 / 推理引擎（极简双行 + 问号提示） -->
             <section class="rt-section">
               <div class="rt-head">
                 <div class="rt-head-left">
@@ -932,8 +1098,13 @@
                   <span class="rt-title">本地运行时</span>
                   <span class="ver-pill">{overview?.engine_version ?? '检测中'}</span>
                   {#if overview?.engine_installed}
-                    <span class="ver-pill backend">{overview.engine_backend} 加速</span>
+                    <span class="ver-pill backend">{overview.engine_backend}</span>
                   {/if}
+                  <span
+                    class="help-tip"
+                    data-tip="空闲时 0 显存占用，发起对话或识图时自动秒级加载；手动关闭可立即释放全部显存。"
+                    >?</span
+                  >
                 </div>
                 <span
                   class="run-badge"
@@ -944,26 +1115,24 @@
                   {:else if status?.status === 'loading' || startingEngine}
                     唤醒中…
                   {:else if overview?.engine_installed}
-                    待命（按需唤醒）
+                    待命
                   {:else}
                     未安装
                   {/if}
                 </span>
               </div>
 
-              <div class="rt-block">
+              <div class="rt-block compact">
                 <div class="rt-row">
-                  <div class="rt-info">
-                    <div class="rt-name">
-                      {overview?.engine_installed ? '已安装本地推理引擎运行时' : '尚未安装本地推理引擎'}
-                    </div>
-                    <div class="rt-desc">
-                      {#if status?.status === 'ready'}
-                        本地推理服务正在运行。关闭后将立即释放全部显存，新对话会自动重新唤醒引擎。
-                      {:else}
-                        本地推理服务处于空闲省电状态（0 显存占用），发起对话或识图时自动秒级加载。
-                      {/if}
-                    </div>
+                  <div class="rt-label-group">
+                    <span class="rt-name">推理服务</span>
+                    <span class="rt-status-sub">
+                      {status?.status === 'ready'
+                        ? '运行中'
+                        : overview?.engine_installed
+                          ? '空闲省电（按需秒级唤醒）'
+                          : '未安装引擎'}
+                    </span>
                   </div>
                   {#if overview?.engine_installed}
                     <button
@@ -985,21 +1154,24 @@
                 <div class="rt-divider"></div>
 
                 <div class="rt-row">
-                  <div class="rt-info">
-                    <div class="rt-name">引擎硬件加速构建</div>
-                    <div class="rt-desc">
-                      已为本机自动匹配
-                      <b>{overview?.hardware.recommended_backend_label ?? '最佳硬件加速'}</b>
-                      构建（全面兼容 NVIDIA N卡、AMD A卡、Intel 显卡及 Mac）。
-                    </div>
+                  <div class="rt-label-group">
+                    <span class="rt-name">硬件加速</span>
+                    <span class="rt-status-sub">
+                      {overview?.hardware.recommended_backend_label ?? '自动匹配最佳后端'}
+                    </span>
+                    <span
+                      class="help-tip"
+                      data-tip="已根据本机显卡自动匹配最佳构建版本，全面兼容 NVIDIA CUDA、AMD/Intel Vulkan、macOS Metal 与 CPU AVX2。"
+                      >?</span
+                    >
                   </div>
                   <div class="engine-dl-group">
                     <select class="backend-sel" bind:value={engineBackendChoice} disabled={downloading}>
-                      <option value="auto">自动匹配 ({overview?.hardware.recommended_backend.toUpperCase() ?? 'AUTO'})</option>
-                      <option value="cuda">NVIDIA 显卡 (CUDA)</option>
-                      <option value="vulkan">AMD / Intel 显卡 (Vulkan)</option>
-                      <option value="cpu">通用处理器 (CPU AVX2)</option>
-                      <option value="metal">macOS (Apple Metal)</option>
+                      <option value="auto">自动 ({overview?.hardware.recommended_backend.toUpperCase() ?? 'AUTO'})</option>
+                      <option value="cuda">NVIDIA (CUDA)</option>
+                      <option value="vulkan">AMD / Intel (Vulkan)</option>
+                      <option value="cpu">CPU (AVX2)</option>
+                      <option value="metal">macOS (Metal)</option>
                     </select>
                     <button
                       class="act-btn light"
@@ -1013,7 +1185,7 @@
               </div>
             </section>
 
-            <!-- 2. 本机配置检查 -->
+            <!-- 2. 本机配置 -->
             <section class="rt-section">
               <div class="rt-head">
                 <div class="rt-head-left">
@@ -1025,12 +1197,12 @@
               <div class="hw-bar">
                 <div class="hw-item">
                   <span class="hw-ic">⚡</span>
-                  <span class="hw-val">{overview?.hardware.gpu_name || '正在检测处理器与显卡…'}</span>
+                  <span class="hw-val">{overview?.hardware.gpu_name || '正在检测…'}</span>
                 </div>
                 <div class="hw-item">
                   <span class="hw-ic">❖</span>
                   <span class="hw-val">
-                    {overview?.hardware.vram_gb ? `${overview.hardware.vram_gb.toFixed(1)} GB 显存` : '共享系统内存'}
+                    {overview?.hardware.vram_gb ? `${overview.hardware.vram_gb.toFixed(1)} GB 显存` : '共享内存'}
                   </span>
                 </div>
                 {#if overview?.hardware.cpu_name}
@@ -1065,173 +1237,438 @@
               </div>
             {/if}
 
-            <!-- 3. 精选视觉模型下载与管理 -->
+            <!-- 3. 本地模型库 -->
             <section class="rt-section">
               <div class="rt-head">
                 <div class="rt-head-left">
                   <span class="rt-icon">⬇</span>
                   <span class="rt-title">本地模型库</span>
                   <span class="ver-pill">{overview?.models.length ?? 2}</span>
+                  <span
+                    class="help-tip"
+                    data-tip="默认 LFM3-VL 2B 模型固定存放在 llama/models 下不可修改路径；点击右侧「＋ 新增模型」可选择本地文件夹添加任意自定义 GGUF 模型。"
+                    >?</span
+                  >
                 </div>
 
                 <div class="model-head-tools">
-                  <!-- 国内镜像 / ModelScope 备用 / 官方源切换 -->
-                  <div class="mirror-switch" title="模型下载源（若当前源较慢将自动切换至 ModelScope 魔搭社区备用源）">
-                    <button
-                      type="button"
-                      class="m-btn"
-                      class:active={s.llm.mirror !== 'huggingface' && s.llm.mirror !== 'modelscope'}
-                      onclick={() => {
-                        s!.llm.mirror = 'hf-mirror';
-                        save();
-                      }}>国内镜像 (hf-mirror)</button
-                    >
-                    <button
-                      type="button"
-                      class="m-btn"
-                      class:active={s.llm.mirror === 'modelscope'}
-                      onclick={() => {
-                        s!.llm.mirror = 'modelscope';
-                        save();
-                      }}>ModelScope (魔搭)</button
-                    >
-                    <button
-                      type="button"
-                      class="m-btn"
-                      class:active={s.llm.mirror === 'huggingface'}
-                      onclick={() => {
-                        s!.llm.mirror = 'huggingface';
-                        save();
-                      }}>HuggingFace</button
-                    >
-                  </div>
-
-                  <!-- 小图标修改模型存放目录（修改后自动迁移已有模型） -->
                   <button
                     type="button"
-                    class="dir-icon-btn"
-                    onclick={handlePickModelsDir}
-                    title={`当前模型目录：${overview?.models_dir ?? '默认安装包目录'}\n点击修改存储位置（已有模型将自动转移至新目录）`}
+                    class="act-btn light"
+                    onclick={() => (showCustomModelModal ? (showCustomModelModal = false) : openAddCustomModel())}
+                    disabled={downloading}
                   >
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                    </svg>
-                    <span>存储位置</span>
+                    {showCustomModelModal ? '✕ 收起' : '＋ 新增模型'}
                   </button>
                 </div>
               </div>
 
+              <!-- 新增 / 编辑用户自定义本地模型面板 -->
+              {#if showCustomModelModal}
+                <div class="custom-model-panel">
+                  <div class="cmp-head">
+                    <div class="cmp-title">
+                      <span>{customForm.id ? '编辑自定义模型' : '新增本地模型'}</span>
+                      <span
+                        class="help-tip"
+                        data-tip="选择包含 .gguf 的文件夹，自动识别主模型与 mmproj 视觉组件；若无视觉组件，识图时将自动调用内置离线 OCR。"
+                        >?</span
+                      >
+                    </div>
+                    <button
+                      type="button"
+                      class="act-btn"
+                      onclick={handleScanCustomFolder}
+                      disabled={scanningCustomFolder}
+                    >
+                      {scanningCustomFolder ? '扫描中…' : '📁 选择文件夹'}
+                    </button>
+                  </div>
+
+                  {#if customScanError}
+                    <div class="cmp-err">⚠ {customScanError}</div>
+                  {/if}
+
+                  {#if customForm.folder_path || customForm.model_path}
+                    <div class="cmp-detected">
+                      <div class="cmp-grid">
+                        <label class="cmp-field">
+                          <span>主模型 (.gguf)</span>
+                          {#if scannedFolder && scannedFolder.models.length > 1}
+                            <select
+                              value={customForm.model_path}
+                              onchange={(e) => {
+                                const p = (e.currentTarget as HTMLSelectElement).value;
+                                customForm.model_path = p;
+                                const found = scannedFolder?.models.find((x) => x.path === p);
+                                if (found) customForm.name = found.suggested_name;
+                              }}
+                            >
+                              {#each scannedFolder.models as mf (mf.path)}
+                                <option value={mf.path}>{mf.file_name} ({mf.size_label})</option>
+                              {/each}
+                            </select>
+                          {:else}
+                            <input
+                              readonly
+                              title={customForm.model_path}
+                              value={scannedFolder?.models[0]
+                                ? `${scannedFolder.models[0].file_name} (${scannedFolder.models[0].size_label})`
+                                : customForm.model_path.split(/[\\/]/).pop() || ''}
+                            />
+                          {/if}
+                        </label>
+
+                        <label class="cmp-field">
+                          <div class="cmp-field-head">
+                            <span>视觉组件 (mmproj)</span>
+                            {#if customForm.mmproj_path}
+                              <span class="cmp-vis-badge ok">👁 视觉</span>
+                            {:else}
+                              <span class="cmp-vis-badge">纯文本</span>
+                            {/if}
+                          </div>
+                          {#if scannedFolder && scannedFolder.mmprojs.length > 0}
+                            <select bind:value={customForm.mmproj_path}>
+                              {#each scannedFolder.mmprojs as vp (vp.path)}
+                                <option value={vp.path}>{vp.file_name} ({vp.size_label})</option>
+                              {/each}
+                              <option value="">不使用视觉组件</option>
+                            </select>
+                          {:else}
+                            <input
+                              readonly
+                              value={customForm.mmproj_path
+                                ? customForm.mmproj_path.split(/[\\/]/).pop()
+                                : '无（自动使用内置离线 OCR）'}
+                            />
+                          {/if}
+                        </label>
+                      </div>
+
+                      <div class="cmp-grid">
+                        <label class="cmp-field">
+                          <span>模型名称</span>
+                          <input
+                            bind:value={customForm.name}
+                            placeholder="如 Qwen2.5-VL-7B"
+                          />
+                        </label>
+                        <label class="cmp-field">
+                          <span>模型描述</span>
+                          <input
+                            bind:value={customForm.desc}
+                            placeholder="如：适合 8GB 显存的视觉推理模型"
+                          />
+                        </label>
+                      </div>
+
+                      <div class="cmp-actions">
+                        <button
+                          type="button"
+                          class="ghost sm"
+                          onclick={() => (showCustomModelModal = false)}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          class="primary save-btn"
+                          onclick={handleSaveCustomModel}
+                          disabled={savingCustomModel || !customForm.model_path}
+                        >
+                          {savingCustomModel ? '保存中…' : '✓ 保存'}
+                        </button>
+                      </div>
+                    </div>
+                  {:else}
+                    <div class="cmp-empty" onclick={handleScanCustomFolder} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && handleScanCustomFolder()}>
+                      <span>📂 点击选择本地模型文件夹（自动识别模型与视觉）</span>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
               <div class="model-list">
                 {#if overview}
                   {#each overview.models as m (m.id)}
-                    <div class="model-card" class:active-card={m.active}>
-                      <div class="mc-main">
-                        <div class="mc-title-row">
-                          <span class="mc-name">{m.name}</span>
-                          {#if m.recommended}
-                            <span class="mc-rec-badge">★ 本机推荐（{m.recommend_reason}）</span>
-                          {/if}
-                        </div>
-                        <div class="mc-desc">{m.desc}</div>
-                        <div class="mc-tags">
-                          <span class="tag gold">
-                            {#if m.id === 'q4m'}
-                              ⚡ 显卡 ≥ 4GB 高清加速
-                            {:else if m.id === 'q2s'}
-                              💡 &lt; 4GB 显存 / CPU 极速
-                            {:else}
-                              📦 本地已识别模型
+                    <div class="model-card-wrap" class:active-card={m.active}>
+                      <div class="model-card">
+                        <div class="mc-main">
+                          <div class="mc-title-row">
+                            <span class="mc-name">{m.name}</span>
+                            {#if m.is_custom}
+                              <span class="mc-custom-badge">自定义</span>
                             {/if}
-                          </span>
+                            {#if m.recommended}
+                              <span class="mc-rec-badge" title={m.recommend_reason}>★ 推荐</span>
+                            {/if}
+                            <span class="help-tip" data-tip={buildModelTip(m)}>?</span>
+                          </div>
+
+                          <div class="mc-meta-row">
+                            <span class="mc-desc">{m.desc}</span>
+                            <div class="mc-tags">
+                              <span class="tag">{m.size_label}</span>
+                              <span class="tag">{m.quant_tag}</span>
+                              <span class="tag">{formatCtxLabel(m.params?.ctx)}</span>
+                              <span class="tag">{m.vision ? '视觉' : '文本'}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div class="mc-right-col">
+                          <div class="mc-action">
+                            {#if m.installed && m.active}
+                              <span class="in-use-pill">✓ 使用中</span>
+                            {:else if m.installed}
+                              <button
+                                class="act-btn light"
+                                onclick={() => handleActivateModel(m.id)}
+                                disabled={downloading}
+                              >
+                                启用
+                              </button>
+                            {:else}
+                              <button
+                                class="act-btn dl-highlight"
+                                onclick={() => {
+                                  if (dlRouteOpenId === m.id) {
+                                    dlRouteOpenId = null;
+                                  } else {
+                                    dlRouteChoice = 'modelscope';
+                                    dlRouteOpenId = m.id;
+                                  }
+                                }}
+                                disabled={downloading}
+                              >
+                                ⬇ 下载 · {m.size_label}
+                              </button>
+                            {/if}
+
+                            {#if m.is_custom}
+                              <button
+                                type="button"
+                                class="mc-icon-btn"
+                                title="编辑名称与描述"
+                                onclick={() => openEditCustomModel(m)}
+                              >
+                                编辑
+                              </button>
+                              <button
+                                type="button"
+                                class="mc-icon-btn danger"
+                                title="从列表移除（不删源文件）"
+                                onclick={() => handleDeleteCustomModel(m)}
+                              >
+                                移除
+                              </button>
+                            {/if}
+                          </div>
+
                           {#if m.installed}
-                            <span class="tag">{m.size_label} · 已就绪</span>
+                            <button
+                              type="button"
+                              class="mc-adv-btn"
+                              class:open={expandedAdvModelId === m.id}
+                              onclick={() =>
+                                (expandedAdvModelId = expandedAdvModelId === m.id ? null : m.id)}
+                            >
+                              <span>⚙ 高级设置</span>
+                              <span class="mc-adv-arrow">{expandedAdvModelId === m.id ? '▴' : '▾'}</span>
+                            </button>
                           {/if}
-                          <span class="tag">默认 8K 上下文</span>
-                          <span class="tag">识图 / 视频</span>
-                          <span class="tag">{m.quant_tag}</span>
                         </div>
                       </div>
 
-                      <div class="mc-action">
-                        {#if m.installed && m.active}
-                          <span class="in-use-pill">✓ 使用中</span>
-                        {:else if m.installed}
-                          <button class="act-btn light" onclick={() => handleActivateModel(m.id)} disabled={downloading}>
-                            启用此模型
-                          </button>
-                        {:else}
-                          <button
-                            class="act-btn"
-                            onclick={() => handleDownloadModel(m.id)}
-                            disabled={downloading}
-                          >
-                            ⬇ 下载 · {m.size_label}
-                          </button>
-                        {/if}
-                      </div>
+                      <!-- 点击「下载」按钮后展开的线路选择栏（默认 ModelScope） -->
+                      {#if !m.installed && dlRouteOpenId === m.id}
+                        <div class="mc-route-bar">
+                          <span class="mc-route-label">下载线路</span>
+                          <div class="mc-route-opts">
+                            <button
+                              type="button"
+                              class="route-chip"
+                              class:active={dlRouteChoice === 'modelscope'}
+                              onclick={() => (dlRouteChoice = 'modelscope')}
+                            >
+                              ModelScope (默认)
+                            </button>
+                            <button
+                              type="button"
+                              class="route-chip"
+                              class:active={dlRouteChoice === 'hf-mirror'}
+                              onclick={() => (dlRouteChoice = 'hf-mirror')}
+                            >
+                              hf-mirror
+                            </button>
+                            <button
+                              type="button"
+                              class="route-chip"
+                              class:active={dlRouteChoice === 'huggingface'}
+                              onclick={() => (dlRouteChoice = 'huggingface')}
+                            >
+                              HuggingFace
+                            </button>
+                          </div>
+                          <div class="mc-route-go">
+                            <button
+                              type="button"
+                              class="primary save-btn"
+                              onclick={() => handleDownloadModel(m.id, dlRouteChoice)}
+                              disabled={downloading}
+                            >
+                              开始下载
+                            </button>
+                            <button
+                              type="button"
+                              class="ghost sm"
+                              onclick={() => (dlRouteOpenId = null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      {/if}
+
+                      <!-- 点击卡片右下角「高级设置」后，卡片内紧凑展开当前模型专属参数 -->
+                      {#if m.installed && expandedAdvModelId === m.id}
+                        <div class="mc-adv-drawer">
+                          <div class="mc-adv-grid">
+                            <label class="mc-param-field">
+                              <span class="mc-lbl-row">
+                                上下文
+                                <span
+                                  class="help-tip"
+                                  data-tip="单次对话最大上下文窗口长度（ctx），默认 32K，最高支持 256K。"
+                                  >?</span
+                                >
+                              </span>
+                              <select
+                                value={String(m.params.ctx || 32768)}
+                                onchange={(e) => {
+                                  m.params.ctx = Number((e.currentTarget as HTMLSelectElement).value) || 32768;
+                                  handleSaveModelParams(m);
+                                }}
+                              >
+                                <option value="4096">4K</option>
+                                <option value="8192">8K</option>
+                                <option value="16384">16K</option>
+                                <option value="32768">32K (默认)</option>
+                                <option value="65536">64K</option>
+                                <option value="100128">100K</option>
+                                <option value="131072">128K</option>
+                                <option value="262144">256K</option>
+                              </select>
+                            </label>
+
+                            <label class="mc-param-field">
+                              <span class="mc-lbl-row">
+                                GPU 层数
+                                <span
+                                  class="help-tip"
+                                  data-tip="加载至显卡的层数 (-ngl)。99 代表全部交由 GPU 加速，0 代表纯 CPU 运行。"
+                                  >?</span
+                                >
+                              </span>
+                              <select
+                                value={String(m.params.ngl ?? 99)}
+                                onchange={(e) => {
+                                  m.params.ngl = Number((e.currentTarget as HTMLSelectElement).value);
+                                  handleSaveModelParams(m);
+                                }}
+                              >
+                                <option value="99">全部 (99)</option>
+                                <option value="48">48 层</option>
+                                <option value="32">32 层</option>
+                                <option value="20">20 层</option>
+                                <option value="12">12 层</option>
+                                <option value="0">纯 CPU (0)</option>
+                              </select>
+                            </label>
+
+                            <label class="mc-param-field">
+                              <span class="mc-lbl-row">
+                                KV 量化
+                                <span
+                                  class="help-tip"
+                                  data-tip="KV Cache 显存量化精度。Q8_0 可大幅降低长上下文显存占用且几乎无损。"
+                                  >?</span
+                                >
+                              </span>
+                              <select
+                                value={m.params.kv_quant || 'q8_0'}
+                                onchange={(e) => {
+                                  m.params.kv_quant = (e.currentTarget as HTMLSelectElement).value;
+                                  handleSaveModelParams(m);
+                                }}
+                              >
+                                <option value="q8_0">Q8_0 (默认)</option>
+                                <option value="f16">F16</option>
+                                <option value="q4_0">Q4_0</option>
+                              </select>
+                            </label>
+
+                            <label class="mc-param-field">
+                              <span class="mc-lbl-row">
+                                闲置释放 (秒)
+                                <span
+                                  class="help-tip tip-left"
+                                  data-tip="停止对话超过设定秒数后，自动关闭推理进程并释放全部显存。"
+                                  >?</span
+                                >
+                              </span>
+                              <input
+                                type="number"
+                                min="30"
+                                step="30"
+                                bind:value={m.params.idle_secs}
+                                onchange={() => handleSaveModelParams(m)}
+                              />
+                            </label>
+                          </div>
+
+                          <div class="mc-adv-row2">
+                            <label class="mc-param-field grow">
+                              <span class="mc-lbl-row">
+                                启动参数
+                                <span
+                                  class="help-tip"
+                                  data-tip="附加给 llama-server 的自定义命令行参数（如 --threads 8 --flash-attn），仅对当前模型生效。"
+                                  >?</span
+                                >
+                              </span>
+                              <input
+                                bind:value={m.params.extra_args}
+                                onchange={() => handleSaveModelParams(m)}
+                                placeholder="可选，如 --threads 8"
+                              />
+                            </label>
+                            <label class="mc-param-field port-col">
+                              <span>端口</span>
+                              <input type="number" bind:value={s.llm.port} onchange={save} />
+                            </label>
+                          </div>
+                        </div>
+                      {/if}
                     </div>
                   {/each}
                 {/if}
               </div>
             </section>
 
-            <!-- 4. 高级设置（默认折叠，小白无需关心，默认 32K 上下文） -->
-            <section class="rt-section">
-              <button class="adv-toggle" type="button" onclick={() => (advOpen = !advOpen)}>
-                <span class="adv-arrow" class:open={advOpen}>▸</span>
-                <span>高级设置（默认 32K 上下文，普通用户无需修改）</span>
-              </button>
-
-              {#if advOpen}
-                <div class="card adv-card">
-                  <div class="grid-2">
-                    <label class="field">
-                      <span>上下文窗口长度（默认 32768 = 32K）</span>
-                      <select
-                        value={String(s.llm.ctx)}
-                        onchange={(e) => {
-                          s!.llm.ctx = Number((e.currentTarget as HTMLSelectElement).value) || 32768;
-                          save();
-                        }}
-                      >
-                        <option value="4096">4K (4096 · 极省显存)</option>
-                        <option value="8192">8K (8192 · 轻量窗口)</option>
-                        <option value="16384">16K (16384 · 标准窗口)</option>
-                        <option value="32768">32K (32768 · 默认推荐)</option>
-                        <option value="65536">64K (65536 · 超长文档)</option>
-                        <option value="100128">100K (100128 · 满血上下文)</option>
-                      </select>
-                    </label>
-                    <label class="field">
-                      <span>闲置自动释放显存（秒）</span>
-                      <input type="number" min="30" bind:value={s.llm.idle_secs} onchange={save} />
-                    </label>
-                    <label class="field">
-                      <span>内部推理端口</span>
-                      <input type="number" bind:value={s.llm.port} onchange={save} />
-                    </label>
-                  </div>
-
-                  <label class="field">
-                    <span>额外启动参数（可选）</span>
-                    <input bind:value={s.llm.extra_args} onchange={save} placeholder="例如 --threads 8" />
-                  </label>
-
-                  <div class="dim">
-                    当前引擎目录：{overview?.engine_dir}<br />
-                    当前模型目录：{overview?.models_dir}
-                  </div>
-                </div>
-              {/if}
-            </section>
-
           {:else}
-            <!-- 子 Tab 2：模型 API（极简配置 + 自动获取模型下拉选择） -->
+            <!-- 子 Tab 2：模型 API（极简配置） -->
             <section class="rt-section">
               <div class="card">
                 <div class="row-item">
-                  <div class="row-meta">
-                    <div class="row-label">启用云端 API 模型</div>
+                  <div class="rt-label-group">
+                    <span class="row-label">启用云端 API 模型</span>
+                    <span
+                      class="help-tip"
+                      data-tip="开启后所有对话与识图均通过云端 API 响应，不占用本机显卡与内存。若所选模型不支持视觉，识图时将自动调用本地离线 OCR。"
+                      >?</span
+                    >
                   </div>
                   <div class="engine-dl-group">
                     <button
@@ -1269,7 +1706,12 @@
 
                 <!-- 服务商快捷选择 -->
                 <div class="field">
-                  <span>服务商</span>
+                  <span class="mc-lbl-row">
+                    服务商
+                    {#if currentProviderPreset.hint}
+                      <span class="help-tip" data-tip={currentProviderPreset.hint}>?</span>
+                    {/if}
+                  </span>
                   <div class="provider-grid">
                     {#each API_PROVIDERS as p (p.id)}
                       <button
@@ -1316,15 +1758,15 @@
                   </div>
                 </div>
 
-                <!-- 模型下拉选择（自动从接口获取模型列表） -->
+                <!-- 模型下拉选择 -->
                 <div class="field">
                   <div class="field-head">
-                    <span>
-                      选择模型
+                    <span class="mc-lbl-row">
+                      模型
                       {#if fetchingModels}
-                        <small class="dim">（正在自动获取模型列表…）</small>
+                        <small class="dim">（获取中…）</small>
                       {:else if fetchedModels.length > 0}
-                        <small class="dim">（已自动获取 {fetchedModels.length} 个模型）</small>
+                        <small class="dim">（{fetchedModels.length}）</small>
                       {/if}
                     </span>
                     <label class="vision-inline-chk">
@@ -1333,7 +1775,7 @@
                         bind:checked={s.llm.api_vision}
                         onchange={save}
                       />
-                      <span>支持视觉识图</span>
+                      <span>视觉识图</span>
                     </label>
                   </div>
 
@@ -1358,7 +1800,7 @@
                         {#each availableApiModels as item (item.id)}
                           <option value={item.id}>{item.label}</option>
                         {/each}
-                        <option value="__custom__">手动输入模型名称…</option>
+                        <option value="__custom__">手动输入…</option>
                       </select>
                     {:else}
                       <input
@@ -1368,7 +1810,7 @@
                           s!.llm.api_vision = inferVisionFromModelId(s!.llm.api_model);
                           save();
                         }}
-                        placeholder="输入模型 ID（如 Qwen/Qwen2.5-VL-72B-Instruct）"
+                        placeholder="输入模型 ID"
                       />
                       {#if availableApiModels.length > 0}
                         <button
@@ -1376,7 +1818,7 @@
                           class="act-btn"
                           onclick={() => (customModelInputMode = false)}
                         >
-                          返回下拉选择
+                          下拉选择
                         </button>
                       {/if}
                     {/if}
@@ -1386,9 +1828,9 @@
                       class="act-btn"
                       onclick={() => handleFetchCloudModels(false)}
                       disabled={fetchingModels}
-                      title="重新从接口获取模型列表"
+                      title="刷新模型列表"
                     >
-                      {fetchingModels ? '获取中…' : '🔄 刷新'}
+                      {fetchingModels ? '…' : '🔄 刷新'}
                     </button>
                   </div>
                 </div>
@@ -2318,6 +2760,63 @@
     gap: 22px;
   }
 
+  /* 问号悬停气泡提示（遵循全局主题样式） */
+  .help-tip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-solid);
+    color: var(--fg-dim);
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: help;
+    user-select: none;
+    flex-shrink: 0;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+  .help-tip:hover {
+    color: var(--fg);
+    border-color: var(--fg-dim);
+    background: var(--hover);
+  }
+  .help-tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 7px);
+    left: 0;
+    width: max-content;
+    max-width: 280px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.5;
+    white-space: pre-line;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(3px);
+    transition: opacity 0.14s ease, transform 0.14s ease;
+    z-index: 90;
+  }
+  .help-tip.tip-left::after {
+    left: auto;
+    right: 0;
+  }
+  .help-tip:hover::after {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
   /* 本地模型页：参考图极简风格 */
   .rt-section {
     display: flex;
@@ -2379,11 +2878,27 @@
     flex-direction: column;
     gap: 14px;
   }
+  .rt-block.compact {
+    padding: 11px 16px;
+    gap: 10px;
+  }
   .rt-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+  }
+  .rt-label-group {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .rt-status-sub {
+    font-size: 12px;
+    color: var(--fg-dim);
+    margin-left: 4px;
   }
   .rt-info {
     display: flex;
@@ -2506,105 +3021,221 @@
     transition: width 0.15s ease;
   }
 
-  /* 模型列表头部工具 */
+  /* 模型列表头部工具与新增自定义模型面板 */
   .model-head-tools {
     display: flex;
     align-items: center;
     gap: 8px;
   }
-  .mirror-switch {
-    display: inline-flex;
+  .custom-model-panel {
     background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 2px;
-    gap: 2px;
+    border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 40%, var(--border));
+    border-radius: 11px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
-  .m-btn {
-    border: none;
-    background: transparent;
-    color: var(--fg-dim);
-    font-size: 11.5px;
-    padding: 3px 9px;
-    border-radius: 5px;
-  }
-  .m-btn.active {
-    background: var(--bg-solid);
-    color: var(--fg);
-    font-weight: 500;
-  }
-  .dir-icon-btn {
-    display: inline-flex;
+  .cmp-head {
+    display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .cmp-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .cmp-sub {
+    font-size: 11.5px;
+    font-weight: 400;
+    color: var(--fg-dim);
+  }
+  .cmp-err {
     font-size: 12px;
+    padding: 6px 10px;
     border-radius: 7px;
-    background: var(--panel);
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: var(--danger);
+  }
+  .cmp-empty {
+    padding: 16px;
+    border-radius: 9px;
+    border: 1px dashed var(--border);
+    background: var(--bg-solid);
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .cmp-empty:hover {
+    border-color: var(--accent, #3b82f6);
+    color: var(--fg);
+  }
+  .cmp-detected {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cmp-det-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    font-size: 11.5px;
+  }
+  .cmp-det-lbl {
+    color: var(--fg-dim);
+    flex-shrink: 0;
+  }
+  .cmp-det-val {
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmp-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 12px;
+  }
+  .cmp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .cmp-field-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .cmp-vis-badge {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-solid);
     border: 1px solid var(--border);
     color: var(--fg-dim);
   }
-  .dir-icon-btn:hover {
+  .cmp-vis-badge.ok {
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+    border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+    color: var(--ok);
+    font-weight: 550;
+  }
+  .cmp-field input,
+  .cmp-field select {
     color: var(--fg);
-    background: var(--hover);
+    background: var(--bg-solid);
+    font-size: 12px;
+    padding: 5px 9px;
+  }
+  .cmp-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 2px;
   }
 
-  /* 模型卡片 */
+  /* 模型卡片与卡片内紧凑展开的高级参数 */
   .model-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
-  .model-card {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 14px 18px;
+  .model-card-wrap {
     border-radius: 11px;
     background: var(--panel);
     border: 1px solid var(--border);
     transition: border-color 0.15s;
+    overflow: visible;
   }
-  .model-card.active-card {
+  .model-card-wrap.active-card {
     border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  }
+  .model-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 11px 16px;
   }
   .mc-main {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
   }
   .mc-title-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 7px;
+    flex-wrap: wrap;
+  }
+  .mc-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
   }
   .mc-name {
     font-size: 14px;
     font-weight: 650;
     color: var(--fg);
   }
+  .mc-default-badge {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    color: var(--fg-dim);
+  }
+  .mc-custom-badge {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent, #3b82f6) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+    color: var(--accent, #3b82f6);
+    font-weight: 550;
+  }
   .mc-rec-badge {
-    font-size: 11px;
-    padding: 2px 8px;
+    font-size: 10.5px;
+    padding: 1px 7px;
     border-radius: 5px;
     background: color-mix(in srgb, var(--warn) 16%, transparent);
     color: var(--warn);
     font-weight: 550;
   }
   .mc-desc {
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--fg-dim);
+    max-width: 340px;
   }
   .mc-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 3px;
+    gap: 5px;
   }
   .tag {
     font-size: 11px;
-    padding: 2px 8px;
+    padding: 2px 7px;
     border-radius: 5px;
     background: var(--bg-solid);
     border: 1px solid var(--border);
@@ -2615,39 +3246,190 @@
     border-color: color-mix(in srgb, var(--warn) 30%, transparent);
     color: var(--warn);
   }
+
+  .mc-right-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .mc-action {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
   .in-use-pill {
     font-size: 12px;
-    padding: 5px 12px;
+    padding: 4px 11px;
     border-radius: 7px;
     background: color-mix(in srgb, var(--ok) 14%, transparent);
     color: var(--ok);
     font-weight: 600;
   }
+  /* 未检测到模型时，下载按钮高亮亮起 */
+  .act-btn.dl-highlight {
+    background: #10b981;
+    color: #fff;
+    border-color: #059669;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+  }
+  .act-btn.dl-highlight:hover:not(:disabled) {
+    background: #059669;
+  }
+  .mc-icon-btn {
+    padding: 4px 8px;
+    font-size: 11.5px;
+    border-radius: 6px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    color: var(--fg-dim);
+  }
+  .mc-icon-btn:hover {
+    color: var(--fg);
+    background: var(--hover);
+  }
+  .mc-icon-btn.danger:hover {
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.08);
+  }
 
-  /* 折叠高级设置 */
-  .adv-toggle {
+  /* 卡片右下角高级设置按钮 */
+  .mc-adv-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    font-size: 11.5px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-dim);
+    margin-top: auto;
+  }
+  .mc-adv-btn:hover,
+  .mc-adv-btn.open {
+    color: var(--fg);
+    background: var(--bg-solid);
+    border-color: var(--border);
+  }
+  .mc-adv-arrow {
+    font-size: 10px;
+  }
+
+  /* 点击下载后展开的线路选择栏 */
+  .mc-route-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 9px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-solid);
+    border-radius: 0 0 11px 11px;
+  }
+  .mc-route-label {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    font-weight: 500;
+  }
+  .mc-route-opts {
     display: flex;
     align-items: center;
     gap: 6px;
-    border: none;
-    background: transparent;
-    color: var(--fg-dim);
-    font-size: 12.5px;
-    padding: 4px 2px;
-    text-align: left;
+    flex-wrap: wrap;
   }
-  .adv-toggle:hover {
+  .route-chip {
+    padding: 4px 10px;
+    font-size: 11.5px;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--fg-dim);
+  }
+  .route-chip:hover {
     color: var(--fg);
   }
-  .adv-arrow {
-    display: inline-block;
-    transition: transform 0.15s ease;
+  .route-chip.active {
+    background: var(--fg);
+    color: var(--bg-solid);
+    border-color: transparent;
+    font-weight: 550;
   }
-  .adv-arrow.open {
-    transform: rotate(90deg);
+  .mc-route-go {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
   }
-  .adv-card {
-    margin-top: 2px;
+
+  /* 卡片内紧凑展开的模型专属高级设置面板 */
+  .mc-adv-drawer {
+    padding: 10px 16px 11px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-solid);
+    border-radius: 0 0 11px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mc-adv-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px 10px;
+  }
+  .mc-adv-row2 {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+  }
+  .mc-param-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    min-width: 0;
+  }
+  .mc-lbl-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .mc-param-field.grow {
+    flex: 1;
+  }
+  .mc-param-field.port-col {
+    width: 110px;
+    flex-shrink: 0;
+  }
+  .mc-param-field select,
+  .mc-param-field input {
+    font-size: 11.5px;
+    padding: 4px 7px;
+    height: 28px;
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+  }
+  .mc-adv-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--fg-dim);
+    padding-top: 2px;
+  }
+  .truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* 通用分组卡片 */
@@ -2924,7 +3706,17 @@
     border-color: color-mix(in srgb, var(--ok) 35%, transparent);
     color: var(--ok);
   }
+  .active-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
   .mode-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 12px;
     padding: 4px 10px;
     border-radius: 6px;
@@ -2951,9 +3743,20 @@
     background: color-mix(in srgb, var(--warn) 10%, var(--panel));
     border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
   }
+  .hw-recommend-banner.compact,
+  .cloud-active-banner.compact {
+    padding: 8px 14px;
+  }
   .cloud-active-banner {
     background: color-mix(in srgb, var(--accent-blue) 8%, var(--panel));
     border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border));
+  }
+  .hwr-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    color: var(--fg);
   }
   .hwr-main {
     display: flex;

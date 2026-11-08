@@ -25,22 +25,89 @@ impl Default for Hotkeys {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ModelParams {
+    /// 上下文窗口长度（默认 32768 = 32K）
+    pub ctx: u32,
+    /// GPU 卸载层数（默认 99 表示全部加载至显卡，0 表示纯 CPU）
+    pub ngl: i32,
+    /// KV Cache 量化类型："q8_0"（默认） | "f16" | "q4_0"
+    pub kv_quant: String,
+    /// 闲置多少秒后自动释放显存（默认 180 秒）
+    pub idle_secs: u64,
+    /// 额外启动参数（如 --threads 8）
+    pub extra_args: String,
+}
+
+impl Default for ModelParams {
+    fn default() -> Self {
+        Self {
+            ctx: 32768,
+            ngl: 99,
+            kv_quant: "q8_0".into(),
+            idle_secs: 180,
+            extra_args: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomLocalModel {
+    pub id: String,
+    pub name: String,
+    pub desc: String,
+    pub folder_path: String,
+    pub model_path: String,
+    pub mmproj_path: String,
+    pub vision: bool,
+    pub quant_tag: String,
+    pub size_label: String,
+    pub params: ModelParams,
+}
+
+impl Default for CustomLocalModel {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            desc: String::new(),
+            folder_path: String::new(),
+            model_path: String::new(),
+            mmproj_path: String::new(),
+            vision: false,
+            quant_tag: "GGUF".into(),
+            size_label: String::new(),
+            params: ModelParams::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LlmSettings {
     /// 本地推理引擎可执行文件路径
     pub server_path: String,
-    /// 模型统一存放目录（默认安装包/程序同级 llama/models 目录）
+    /// 默认模型统一存放目录（固定为 llama/models 目录）
     pub models_dir: String,
     pub model_path: String,
     pub mmproj_path: String,
-    /// 模型下载源：hf-mirror（国内镜像默认） | huggingface
+    /// 模型下载源：modelscope（默认） | hf-mirror | huggingface
     pub mirror: String,
     pub port: u16,
     pub ctx: u32,
+    /// GPU 卸载层数（默认 99）
+    pub ngl: i32,
+    /// KV Cache 量化精度（默认 q8_0）
+    pub kv_quant: String,
     /// 闲置多少秒后释放模型
     pub idle_secs: u64,
     /// 预估所需显存（MB），低于该值触发让道检查
     pub required_vram_mb: u64,
     pub extra_args: String,
+    /// 每个模型（如 q4m / q2s / custom_xxx）各自独立的参数配置
+    pub model_params: std::collections::HashMap<String, ModelParams>,
+    /// 用户自定义的多个本地模型列表
+    pub custom_models: Vec<CustomLocalModel>,
     /// 是否开启云端 OpenAI 兼容模型 API（开启后所有对话/划词/识图均走云端 API，无需本地显卡与高配 CPU）
     pub api_enabled: bool,
     /// 云端服务商标识：siliconflow | deepseek | dashscope | zhipu | doubao | moonshot | openai | ollama | custom
@@ -84,12 +151,16 @@ impl Default for LlmSettings {
             models_dir: models_dir.to_string_lossy().into(),
             model_path: default_model.to_string_lossy().into(),
             mmproj_path: default_mmproj.to_string_lossy().into(),
-            mirror: "hf-mirror".into(),
+            mirror: "modelscope".into(),
             port: 18080,
             ctx: 32768,
+            ngl: 99,
+            kv_quant: "q8_0".into(),
             idle_secs: 180,
             required_vram_mb: 2400,
             extra_args: String::new(),
+            model_params: std::collections::HashMap::new(),
+            custom_models: Vec::new(),
             api_enabled: false,
             api_provider: "siliconflow".into(),
             api_base_url: "https://api.siliconflow.cn/v1".into(),
@@ -300,14 +371,19 @@ impl SettingsStore {
         {
             inner.llm.server_path = def_llm.server_path;
         }
-        if inner.llm.models_dir.trim().is_empty() {
-            inner.llm.models_dir = def_llm.models_dir;
-        }
+        // 默认模型目录固定在 llama/models 下不可修改
+        inner.llm.models_dir = def_llm.models_dir;
         if inner.llm.mirror.trim().is_empty() {
-            inner.llm.mirror = "hf-mirror".into();
+            inner.llm.mirror = "modelscope".into();
         }
         if inner.llm.ctx == 20480 || inner.llm.ctx == 8192 || inner.llm.ctx == 0 {
             inner.llm.ctx = 32768;
+        }
+        if inner.llm.kv_quant.trim().is_empty() {
+            inner.llm.kv_quant = "q8_0".into();
+        }
+        if inner.llm.ngl < 0 {
+            inner.llm.ngl = 99;
         }
         if inner.llm.api_provider.trim().is_empty() {
             inner.llm.api_provider = "siliconflow".into();

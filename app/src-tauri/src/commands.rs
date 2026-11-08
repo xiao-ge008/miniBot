@@ -227,6 +227,54 @@ pub async fn engine_activate_model(app: AppHandle, model_id: String) -> R<crate:
 }
 
 #[tauri::command]
+pub async fn engine_update_model_params(
+    app: AppHandle,
+    model_id: String,
+    params: crate::settings::ModelParams,
+) -> R<crate::engine::EngineOverview> {
+    crate::engine::update_model_params(&app, model_id, params).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn engine_scan_custom_folder(
+    st: State<'_, AppState>,
+) -> R<Option<crate::engine::ScannedFolderResult>> {
+    let s = st.settings.get();
+    let cur_dir = s
+        .llm
+        .custom_models
+        .last()
+        .map(|m| m.folder_path.clone())
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| {
+            crate::settings::default_engine_dir()
+                .join("models")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let res = tokio::task::spawn_blocking(move || crate::engine::scan_custom_folder_dialog(&cur_dir))
+        .await
+        .map_err(e)?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn engine_save_custom_model(
+    app: AppHandle,
+    model: crate::settings::CustomLocalModel,
+) -> R<crate::engine::EngineOverview> {
+    crate::engine::save_custom_model(&app, model).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn engine_delete_custom_model(
+    app: AppHandle,
+    model_id: String,
+) -> R<crate::engine::EngineOverview> {
+    crate::engine::delete_custom_model(&app, model_id).await.map_err(e)
+}
+
+#[tauri::command]
 pub async fn engine_pick_models_dir(
     app: AppHandle,
     st: State<'_, AppState>,

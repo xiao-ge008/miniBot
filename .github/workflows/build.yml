@@ -78,6 +78,63 @@ jobs:
       - name: Build Tauri desktop bundles
         working-directory: ./app
         run: pnpm tauri build
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+
+      - name: Deep Ad-hoc sign macOS app & repack DMG with one-click fixer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          APP_PATH="app/src-tauri/target/release/bundle/macos/miniBot.app"
+          DMG_DIR="app/src-tauri/target/release/bundle/dmg"
+          DMG_FILE=$(ls "$DMG_DIR"/*.dmg | head -n 1)
+
+          echo "==> 1. Cleaning xattr & applying deep Ad-hoc signature to miniBot.app"
+          xattr -cr "$APP_PATH"
+          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+          echo "==> 2. Preparing DMG staging folder with Applications link & one-click fixer"
+          STAGE_DIR=$(mktemp -d /tmp/minibot_dmg_stage.XXXXXX)
+          cp -R "$APP_PATH" "$STAGE_DIR/miniBot.app"
+          ln -s /Applications "$STAGE_DIR/Applications"
+
+          FIXER_PATH="$STAGE_DIR/首次打开修复(右键打开).command"
+          cat << 'EOF' > "$FIXER_PATH"
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          echo "=================================================="
+          echo "  miniBot macOS 一键安装与“已损坏”隔离修复工具"
+          echo "=================================================="
+          if [ -d "$DIR/miniBot.app" ]; then
+              echo "-> 正在将 miniBot.app 安装到 /Applications ..."
+              rm -rf "/Applications/miniBot.app" 2>/dev/null || sudo rm -rf "/Applications/miniBot.app"
+              cp -R "$DIR/miniBot.app" "/Applications/miniBot.app" 2>/dev/null || sudo cp -R "$DIR/miniBot.app" "/Applications/miniBot.app"
+          fi
+          if [ ! -d "/Applications/miniBot.app" ]; then
+              echo "❌ 未在 /Applications 中找到 miniBot.app，请先将 miniBot.app 拖入 Applications 文件夹！"
+              read -n 1 -s -r -p "按任意键退出..."
+              exit 1
+          fi
+          echo "-> 正在清除浏览器下载隔离属性 (com.apple.quarantine) ..."
+          xattr -cr "/Applications/miniBot.app" 2>/dev/null || sudo xattr -cr "/Applications/miniBot.app"
+          echo "-> 正在刷新 Apple Silicon 本地深度签名 ..."
+          codesign --force --deep --sign - "/Applications/miniBot.app" 2>/dev/null || sudo codesign --force --deep --sign - "/Applications/miniBot.app"
+          echo "✅ 修复完成！正在为您启动 miniBot ..."
+          open "/Applications/miniBot.app"
+          sleep 1
+          exit 0
+          EOF
+          chmod +x "$FIXER_PATH"
+          xattr -cr "$STAGE_DIR"
+
+          echo "==> 3. Rebuilding compressed DMG: $DMG_FILE"
+          rm -f "$DMG_FILE"
+          hdiutil create -volname "miniBot" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_FILE"
+          codesign --force --sign - "$DMG_FILE" || true
+          rm -rf "$STAGE_DIR"
+          ls -lh "$DMG_FILE"
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -97,6 +154,15 @@ jobs:
             - **Windows (x64)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_x64-setup.exe`
             - **macOS (Apple Silicon)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_aarch64.dmg`
             - **客户端在线更新**: 已安装旧版本的用户可直接打开 **「miniBot 设置 -> 版本更新」** 点击 **「检查更新」** 一键自动下载并覆盖升级。
+
+            ### 🍎 macOS 首次安装提示（若提示“已损坏，无法打开”）
+            由于未接入 Apple 付费公证，浏览器直接下载 `.dmg` 会被 macOS 附加隔离标签。首次安装只需任选以下一种方式即可正常打开：
+            1. **一键修复脚本（免命令）**：打开 `.dmg` 后，右键点击其中的 **`首次打开修复(右键打开).command`** -> 选择 **「打开」**，将自动完成安装、解除隔离并启动 miniBot。
+            2. **终端一行命令**：将 `miniBot.app` 拖入 `Applications` 后，在终端执行：
+               ```bash
+               xattr -cr /Applications/miniBot.app
+               ```
+
             > 注：本安装包不包含本地 `llama` 引擎与 `.gguf` 模型文件；首次启动后可在「设置 -> 本地模型」中按需一键下载，或直接启用「模型 API」使用云端模型。
           files: ${{ matrix.bundle_path }}
           prerelease: false

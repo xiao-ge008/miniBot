@@ -63,6 +63,11 @@ pnpm tauri build
 - **Windows 安装包**：`app/src-tauri/target/release/bundle/nsis/miniBot_*_x64-setup.exe`
 - **macOS 安装包**：`app/src-tauri/target/release/bundle/dmg/miniBot_*.dmg`
 
+> **🍎 macOS 首次安装说明**：若从浏览器下载 `.dmg` 后提示 **`“miniBot”已损坏，无法打开`**（macOS Gatekeeper 对未付费公证应用的默认隔离拦截），只需打开 `.dmg` 内置的 **`首次打开修复(右键打开).command`**（右键 -> 打开），或在终端执行一行命令即可立即正常使用：
+> ```bash
+> xattr -cr /Applications/miniBot.app
+> ```
+
 ---
 
 ## 📦 GitHub Actions 自动打包

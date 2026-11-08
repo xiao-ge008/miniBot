@@ -2,9 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>miniBot 需要屏幕录制权限，以便提供区域截图、OCR 文字识别与屏幕取色功能。</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>miniBot 需要自动化控制权限，以便支持划词取词、替换原文与系统对话框交互。</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>miniBot 需要屏幕录制权限以提供区域截图、离线 OCR 文字识别、二维码解析与屏幕取色功能。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>miniBot 需要辅助与自动化权限以捕获鼠标划词选区并执行快捷 AI 处理。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>miniBot 需要本地网络权限以发现局域网内的 LocalSend 设备并高速互传文件。</string>
 </dict>
 </plist>

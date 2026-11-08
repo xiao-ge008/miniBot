@@ -50,8 +50,28 @@ pub struct ModelCard {
     pub recommend_reason: String,
     pub installed: bool,
     pub active: bool,
+    pub is_custom: bool,
+    pub vision: bool,
+    pub folder_path: String,
     pub model_path: String,
     pub mmproj_path: String,
+    pub params: crate::settings::ModelParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannedGgufFile {
+    pub path: String,
+    pub file_name: String,
+    pub suggested_name: String,
+    pub size_label: String,
+    pub quant_tag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannedFolderResult {
+    pub folder_path: String,
+    pub models: Vec<ScannedGgufFile>,
+    pub mmprojs: Vec<ScannedGgufFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -488,6 +508,56 @@ fn norm_path(p: &str) -> String {
     p.replace('\\', "/").trim().to_lowercase()
 }
 
+/// 从文件名智能提取 GGUF 量化标签（如 Q4_K_M / Q8_0 / IQ2_S / F16）
+pub fn infer_quant_tag(filename: &str) -> String {
+    let up = filename.to_uppercase();
+    for tag in [
+        "Q4_K_M", "Q4_K_S", "Q4_K_L", "Q4_0", "Q4_1", "IQ4_XS", "IQ4_NL",
+        "Q5_K_M", "Q5_K_S", "Q5_0", "Q6_K", "Q8_0",
+        "Q3_K_M", "Q3_K_S", "Q3_K_L", "IQ3_M", "IQ3_XS",
+        "Q2_K_XL", "Q2_K", "IQ2_S", "IQ2_M", "IQ2_XS", "IQ2_XXS", "Q2_S",
+        "BF16", "FP16", "F16", "F32",
+    ] {
+        if up.contains(tag) {
+            return tag.to_string();
+        }
+    }
+    "GGUF".into()
+}
+
+/// 从模型文件名生成简洁的推荐显示名称
+pub fn clean_model_display_name(stem: &str) -> String {
+    let mut s = stem.trim().to_string();
+    for suffix in [
+        "-Q4_K_M", "-Q4_K_S", "-Q4_K", "-Q4_0", "-Q5_K_M", "-Q5_K_S", "-Q6_K", "-Q8_0",
+        "-Q3_K_M", "-Q2_K_XL", "-Q2_K", "-IQ2_S", "-UD-Q2_K_XL", "-F16", "-BF16",
+        "_Q4_K_M", "_Q8_0", "_Q2_K",
+    ] {
+        if s.to_uppercase().ends_with(suffix) {
+            let new_len = s.len().saturating_sub(suffix.len());
+            s.truncate(new_len);
+            break;
+        }
+    }
+    if s.is_empty() {
+        stem.to_string()
+    } else {
+        s
+    }
+}
+
+fn apply_params_to_llm(llm: &mut crate::settings::LlmSettings, params: &crate::settings::ModelParams) {
+    llm.ctx = params.ctx.max(2048);
+    llm.ngl = params.ngl.clamp(0, 999);
+    llm.kv_quant = if params.kv_quant.trim().is_empty() {
+        "q8_0".into()
+    } else {
+        params.kv_quant.clone()
+    };
+    llm.idle_secs = params.idle_secs.max(30);
+    llm.extra_args = params.extra_args.clone();
+}
+
 pub async fn get_overview(app: &AppHandle) -> EngineOverview {
     let st = app.state::<crate::AppState>();
     let mut s = st.settings.get();
@@ -498,11 +568,8 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(crate::settings::default_engine_dir);
-    let models_dir = if s.llm.models_dir.trim().is_empty() {
-        engine_dir.join("models")
-    } else {
-        PathBuf::from(&s.llm.models_dir)
-    };
+    // 默认模型路径强制固定在 llama/models 下不可修改
+    let models_dir = engine_dir.join("models");
     let _ = std::fs::create_dir_all(&models_dir);
 
     let engine_installed = server_path.exists();
@@ -513,11 +580,11 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         "未安装".into()
     };
 
-    // 扫描当前 models_dir（及 2 层子目录）中的所有 .gguf 文件
+    // 扫描固定默认目录 llama/models（及 2 层子目录，如 llama/models/LFM3）中的所有 .gguf 文件
     let all_ggufs = scan_gguf_files(&models_dir, 2);
 
-    // 收集所有 mmproj 视觉投影文件（当前目录优先，父目录或默认 engine_dir/models 兜底）
-    let mut all_mmprojs: Vec<PathBuf> = all_ggufs
+    // 收集默认目录下的所有 LFM 视觉投影文件 mmproj
+    let all_mmprojs: Vec<PathBuf> = all_ggufs
         .iter()
         .filter(|p| {
             p.file_name()
@@ -527,28 +594,6 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         })
         .cloned()
         .collect();
-
-    if all_mmprojs.is_empty() {
-        if let Some(parent) = models_dir.parent() {
-            all_mmprojs.extend(scan_gguf_files(parent, 1).into_iter().filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.to_lowercase().contains("mmproj"))
-                    .unwrap_or(false)
-            }));
-        }
-    }
-    if all_mmprojs.is_empty() {
-        let fallback_models = engine_dir.join("models");
-        if fallback_models != models_dir && fallback_models.exists() {
-            all_mmprojs.extend(scan_gguf_files(&fallback_models, 2).into_iter().filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.to_lowercase().contains("mmproj"))
-                    .unwrap_or(false)
-            }));
-        }
-    }
 
     let default_mmproj_path = all_mmprojs
         .first()
@@ -579,126 +624,145 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         default_mmproj_path.to_string_lossy().into()
     };
 
-    // 过滤出所有主模型文件（不含 mmproj 的 .gguf）
-    let main_ggufs: Vec<PathBuf> = all_ggufs
-        .into_iter()
-        .filter(|p| {
-            !p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.to_lowercase().contains("mmproj"))
-                .unwrap_or(false)
-        })
-        .collect();
-
+    // 仅识别包含 "lfm" 的主模型文件作为内置 LFM3 2B 默认模型（绝不将其他自定义模型误识别为 LFM3）
     let mut q4m_found: Option<PathBuf> = None;
     let mut q2s_found: Option<PathBuf> = None;
-    let mut custom_ggufs: Vec<PathBuf> = Vec::new();
 
-    for p in &main_ggufs {
+    for p in &all_ggufs {
         let fname = p
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if q4m_found.is_none() && (fname.contains("q4_k_m") || fname.contains("q4_k") || fname.contains("q4m")) {
+        if fname.contains("mmproj") || !fname.contains("lfm") {
+            continue;
+        }
+        if q4m_found.is_none() && (fname.contains("q4_k_m") || fname.contains("q4_k") || fname.contains("q4m") || fname.contains("q4")) {
             q4m_found = Some(p.clone());
         } else if q2s_found.is_none()
-            && (fname.contains("iq2_s") || fname.contains("q2_k") || fname.contains("q2_s") || fname.contains("q2s"))
+            && (fname.contains("iq2_s") || fname.contains("q2_k") || fname.contains("q2_s") || fname.contains("q2s") || fname.contains("q2"))
         {
             q2s_found = Some(p.clone());
-        } else {
-            custom_ggufs.push(p.clone());
         }
     }
 
     let cur_model_norm = norm_path(&s.llm.model_path);
 
-    // 1. Q4M 均衡版
+    // 1. 默认模型一：LFM3-VL 2B · Q4
     let q4m_path = q4m_found
         .clone()
         .unwrap_or_else(|| models_dir.join("LFM3-VL-2B-Q4_K_M.gguf"));
     let q4m_installed = q4m_found.is_some();
     let q4m_active = q4m_installed && norm_path(&q4m_path.to_string_lossy()) == cur_model_norm;
-    let q4m_desc = if let Some(ref p) = q4m_found {
-        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("LFM3-VL-2B-Q4_K_M.gguf");
-        format!("已识别本地模型：{fname} · 支持图片与视频识别，8K 上下文流畅运行")
-    } else {
-        "全能多模态视觉模型；支持图片与视频识别；8K 上下文高速流畅".into()
-    };
+    let q4m_desc = "全能视觉多模态 · 支持图片与视频识别".to_string();
+    let q4m_params = s
+        .llm
+        .model_params
+        .get("q4m")
+        .cloned()
+        .unwrap_or_default();
 
-    // 2. Q2S 轻量版
+    // 2. 默认模型二：LFM3-VL 2B · Q2
     let q2s_path = q2s_found
         .clone()
-        .unwrap_or_else(|| models_dir.join("LFM3-VL-2B-IQ2_S.gguf"));
+        .unwrap_or_else(|| models_dir.join("LFM3-VL-2B-Q2_K.gguf"));
     let q2s_installed = q2s_found.is_some();
     let q2s_active = q2s_installed && norm_path(&q2s_path.to_string_lossy()) == cur_model_norm;
-    let q2s_desc = if let Some(ref p) = q2s_found {
-        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("LFM3-VL-2B-IQ2_S.gguf");
-        format!("已识别本地模型：{fname} · 专为 4GB 以下显存、核显及 CPU 优化")
-    } else {
-        "超低显存与内存占用；专为 4GB 以下显卡、核显及纯 CPU 环境优化".into()
-    };
+    let q2s_desc = "轻量极速视觉版 · 专为低显存、核显与纯 CPU 优化".to_string();
+    let q2s_params = s
+        .llm
+        .model_params
+        .get("q2s")
+        .cloned()
+        .unwrap_or_default();
 
-    let mut models: Vec<ModelCard> = Vec::new();
+    let mut models: Vec<ModelCard> = vec![
+        ModelCard {
+            id: "q4m".into(),
+            name: "LFM3-VL 2B · Q4".into(),
+            quant_tag: "Q4_K_M".into(),
+            desc: q4m_desc,
+            size_label: file_size_gb_label(&q4m_path, "1.4 GB"),
+            recommended: hw.recommended_model == "q4m",
+            recommend_reason: "显存 ≥ 4GB 推荐".into(),
+            installed: q4m_installed,
+            active: q4m_active,
+            is_custom: false,
+            vision: true,
+            folder_path: models_dir.to_string_lossy().into(),
+            model_path: q4m_path.to_string_lossy().into(),
+            mmproj_path: pick_mmproj_for(&q4m_path),
+            params: q4m_params,
+        },
+        ModelCard {
+            id: "q2s".into(),
+            name: "LFM3-VL 2B · Q2".into(),
+            quant_tag: "Q2_K".into(),
+            desc: q2s_desc,
+            size_label: file_size_gb_label(&q2s_path, "1.0 GB"),
+            recommended: hw.recommended_model == "q2s",
+            recommend_reason: "显存 < 4GB 或 CPU 推荐".into(),
+            installed: q2s_installed,
+            active: q2s_active,
+            is_custom: false,
+            vision: true,
+            folder_path: models_dir.to_string_lossy().into(),
+            model_path: q2s_path.to_string_lossy().into(),
+            mmproj_path: pick_mmproj_for(&q2s_path),
+            params: q2s_params,
+        },
+    ];
 
-    // 若目录中还存在其他自定义 .gguf 模型文件，也自动识别并展示出来
-    for (idx, cp) in custom_ggufs.iter().enumerate() {
-        let fname = cp
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("custom.gguf")
-            .to_string();
-        let stem = cp
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("本地模型")
-            .to_string();
-        let cp_str = cp.to_string_lossy().to_string();
-        let is_act = norm_path(&cp_str) == cur_model_norm;
+    // 3. 附加用户自定义的多个本地模型
+    for cm in &s.llm.custom_models {
+        let mp = PathBuf::from(&cm.model_path);
+        let installed = mp.exists() && mp.is_file();
+        let is_act = installed && norm_path(&cm.model_path) == cur_model_norm;
+        let has_vision = !cm.mmproj_path.trim().is_empty() && Path::new(&cm.mmproj_path).exists();
+        let params = s
+            .llm
+            .model_params
+            .get(&cm.id)
+            .cloned()
+            .unwrap_or_else(|| cm.params.clone());
+        let size_lbl = if installed {
+            file_size_gb_label(&mp, &cm.size_label)
+        } else if !cm.size_label.is_empty() {
+            cm.size_label.clone()
+        } else {
+            "本地".into()
+        };
+        let quant = if cm.quant_tag.trim().is_empty() {
+            infer_quant_tag(&cm.model_path)
+        } else {
+            cm.quant_tag.clone()
+        };
+        let desc = if cm.desc.trim().is_empty() {
+            let fname = mp.file_name().and_then(|n| n.to_str()).unwrap_or("custom.gguf");
+            format!("自定义本地模型：{fname}")
+        } else {
+            cm.desc.clone()
+        };
         models.push(ModelCard {
-            id: format!("custom_{idx}"),
-            name: stem,
-            quant_tag: "GGUF".into(),
-            desc: format!("已识别目录内的模型文件：{fname}"),
-            size_label: file_size_gb_label(cp, "本地"),
+            id: cm.id.clone(),
+            name: cm.name.clone(),
+            quant_tag: quant,
+            desc,
+            size_label: size_lbl,
             recommended: false,
             recommend_reason: String::new(),
-            installed: true,
+            installed,
             active: is_act,
-            model_path: cp_str,
-            mmproj_path: pick_mmproj_for(cp),
+            is_custom: true,
+            vision: has_vision,
+            folder_path: cm.folder_path.clone(),
+            model_path: cm.model_path.clone(),
+            mmproj_path: if has_vision { cm.mmproj_path.clone() } else { String::new() },
+            params,
         });
     }
 
-    models.push(ModelCard {
-        id: "q4m".into(),
-        name: "LFM3-VL 2B · Q4M 均衡版".into(),
-        quant_tag: "Q4_K_M".into(),
-        desc: q4m_desc,
-        size_label: file_size_gb_label(&q4m_path, "1.4 GB"),
-        recommended: hw.recommended_model == "q4m",
-        recommend_reason: "显存 ≥ 4GB 推荐".into(),
-        installed: q4m_installed,
-        active: q4m_active,
-        model_path: q4m_path.to_string_lossy().into(),
-        mmproj_path: pick_mmproj_for(&q4m_path),
-    });
-
-    models.push(ModelCard {
-        id: "q2s".into(),
-        name: "LFM3-VL 2B · Q2S 轻量版".into(),
-        quant_tag: "Q2_S".into(),
-        desc: q2s_desc,
-        size_label: file_size_gb_label(&q2s_path, "1.0 GB"),
-        recommended: hw.recommended_model == "q2s",
-        recommend_reason: "显存 < 4GB 或 CPU 推荐".into(),
-        installed: q2s_installed,
-        active: q2s_active,
-        model_path: q2s_path.to_string_lossy().into(),
-        mmproj_path: pick_mmproj_for(&q2s_path),
-    });
-
-    // 若当前没有任何已安装模型处于 active 状态，但目录内已识别到可用模型，则自动激活最佳已安装模型
+    // 若当前没有任何已安装模型处于 active 状态，但列表中存在已就绪模型，则自动激活最佳已安装模型并同步其参数
     let any_active = models.iter().any(|m| m.installed && m.active);
     if !any_active {
         let best_idx = models
@@ -708,9 +772,8 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         if let Some(i) = best_idx {
             models[i].active = true;
             s.llm.model_path = models[i].model_path.clone();
-            if !all_mmprojs.is_empty() || !Path::new(&s.llm.mmproj_path).exists() {
-                s.llm.mmproj_path = models[i].mmproj_path.clone();
-            }
+            s.llm.mmproj_path = models[i].mmproj_path.clone();
+            apply_params_to_llm(&mut s.llm, &models[i].params);
             let _ = st.settings.set(s.clone());
         }
     }
@@ -721,13 +784,13 @@ pub async fn get_overview(app: &AppHandle) -> EngineOverview {
         engine_backend,
         engine_dir: engine_dir.to_string_lossy().into(),
         models_dir: models_dir.to_string_lossy().into(),
-        mirror: if s.llm.mirror.is_empty() { "hf-mirror".into() } else { s.llm.mirror },
+        mirror: if s.llm.mirror.is_empty() { "modelscope".into() } else { s.llm.mirror },
         hardware: hw,
         models,
     }
 }
 
-// ---------- 切换激活模型 ----------
+// ---------- 切换激活模型（同时应用该模型绑定的独立参数） ----------
 
 pub async fn activate_model(app: &AppHandle, model_id: &str) -> anyhow::Result<EngineOverview> {
     let overview = get_overview(app).await;
@@ -737,15 +800,195 @@ pub async fn activate_model(app: &AppHandle, model_id: &str) -> anyhow::Result<E
         .find(|m| m.id == model_id)
         .ok_or_else(|| anyhow::anyhow!("未找到模型规格：{model_id}"))?;
     if !card.installed {
-        anyhow::bail!("该模型尚未下载，请先点击下载");
+        anyhow::bail!("该模型文件尚未就绪，请先下载或检查模型路径");
     }
     let st = app.state::<crate::AppState>();
-    // 若当前模型正在运行，先释放显存以便下次用新模型启动
+    // 若当前模型正在运行，先释放显存以便下次用新模型及新参数启动
     st.llm.release(app, crate::llm::Status::Released, "切换模型").await;
     let mut s = st.settings.get();
     s.llm.model_path = card.model_path.clone();
     s.llm.mmproj_path = card.mmproj_path.clone();
     s.llm.required_vram_mb = if model_id == "q2s" { 1500 } else { 2400 };
+    apply_params_to_llm(&mut s.llm, &card.params);
+    st.settings.set(s)?;
+    Ok(get_overview(app).await)
+}
+
+// ---------- 保存单个模型的独立高级设置参数 ----------
+
+pub async fn update_model_params(
+    app: &AppHandle,
+    model_id: String,
+    params: crate::settings::ModelParams,
+) -> anyhow::Result<EngineOverview> {
+    let st = app.state::<crate::AppState>();
+    let mut s = st.settings.get();
+    let clean_params = crate::settings::ModelParams {
+        ctx: params.ctx.max(2048),
+        ngl: params.ngl.clamp(0, 999),
+        kv_quant: if params.kv_quant.trim().is_empty() {
+            "q8_0".into()
+        } else {
+            params.kv_quant.trim().to_lowercase()
+        },
+        idle_secs: params.idle_secs.max(30),
+        extra_args: params.extra_args.trim().to_string(),
+    };
+    s.llm.model_params.insert(model_id.clone(), clean_params.clone());
+    if let Some(cm) = s.llm.custom_models.iter_mut().find(|m| m.id == model_id) {
+        cm.params = clean_params.clone();
+    }
+
+    // 检查该模型是否为当前激活模型，若是则同步更新当前生效的引擎参数，并在运行中时自动释放以便新参数生效
+    let overview_before = get_overview(app).await;
+    let is_active = overview_before
+        .models
+        .iter()
+        .any(|m| m.id == model_id && m.active);
+    if is_active {
+        apply_params_to_llm(&mut s.llm, &clean_params);
+    }
+    st.settings.set(s)?;
+    if is_active && st.llm.status() == crate::llm::Status::Ready {
+        st.llm
+            .release(app, crate::llm::Status::Released, "模型参数已更新，下次请求按新参数加载")
+            .await;
+    }
+    Ok(get_overview(app).await)
+}
+
+// ---------- 用户自定义模型：选择文件夹识别主模型与视觉组件、保存与删除 ----------
+
+pub fn scan_custom_folder_dialog(initial_dir: &str) -> Option<ScannedFolderResult> {
+    let picked = pick_folder_dialog_with_title(
+        initial_dir,
+        "选择本地模型文件夹（自动识别 .gguf 主模型与 mmproj 视觉组件）",
+    )?;
+    let dir = PathBuf::from(&picked);
+    let ggufs = scan_gguf_files(&dir, 2);
+    let mut models = Vec::new();
+    let mut mmprojs = Vec::new();
+
+    for p in ggufs {
+        let fname = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let stem = p
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("自定义模型")
+            .to_string();
+        let lower = fname.to_lowercase();
+        let item = ScannedGgufFile {
+            path: p.to_string_lossy().into(),
+            file_name: fname.clone(),
+            suggested_name: clean_model_display_name(&stem),
+            size_label: file_size_gb_label(&p, "本地"),
+            quant_tag: infer_quant_tag(&fname),
+        };
+        if lower.contains("mmproj") {
+            mmprojs.push(item);
+        } else {
+            models.push(item);
+        }
+    }
+
+    Some(ScannedFolderResult {
+        folder_path: picked,
+        models,
+        mmprojs,
+    })
+}
+
+pub async fn save_custom_model(
+    app: &AppHandle,
+    mut custom: crate::settings::CustomLocalModel,
+) -> anyhow::Result<EngineOverview> {
+    let mp = PathBuf::from(custom.model_path.trim());
+    if !mp.exists() || !mp.is_file() {
+        anyhow::bail!("所选主模型文件不存在，请先选择包含 .gguf 模型的文件夹");
+    }
+    let fname = mp
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("model.gguf")
+        .to_string();
+    let stem = mp
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("自定义本地模型")
+        .to_string();
+
+    if custom.id.trim().is_empty() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(1);
+        custom.id = format!("custom_{ts}");
+    }
+    if custom.name.trim().is_empty() {
+        custom.name = clean_model_display_name(&stem);
+    } else {
+        custom.name = custom.name.trim().to_string();
+    }
+    if custom.folder_path.trim().is_empty() {
+        custom.folder_path = mp
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    custom.mmproj_path = custom.mmproj_path.trim().to_string();
+    custom.vision = !custom.mmproj_path.is_empty() && Path::new(&custom.mmproj_path).exists();
+    custom.size_label = file_size_gb_label(&mp, "本地");
+    custom.quant_tag = infer_quant_tag(&fname);
+    if custom.desc.trim().is_empty() {
+        custom.desc = if custom.vision {
+            format!("自定义多模态视觉模型：{fname}")
+        } else {
+            format!("自定义本地语言模型：{fname}")
+        };
+    } else {
+        custom.desc = custom.desc.trim().to_string();
+    }
+
+    let st = app.state::<crate::AppState>();
+    let mut s = st.settings.get();
+    s.llm
+        .model_params
+        .entry(custom.id.clone())
+        .or_insert_with(|| custom.params.clone());
+
+    if let Some(existing) = s.llm.custom_models.iter_mut().find(|m| m.id == custom.id) {
+        *existing = custom.clone();
+    } else {
+        s.llm.custom_models.push(custom.clone());
+    }
+    st.settings.set(s)?;
+    Ok(get_overview(app).await)
+}
+
+pub async fn delete_custom_model(app: &AppHandle, model_id: String) -> anyhow::Result<EngineOverview> {
+    let st = app.state::<crate::AppState>();
+    let mut s = st.settings.get();
+    let removed_path = s
+        .llm
+        .custom_models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.model_path.clone())
+        .unwrap_or_default();
+    s.llm.custom_models.retain(|m| m.id != model_id);
+    s.llm.model_params.remove(&model_id);
+
+    if !removed_path.is_empty() && norm_path(&s.llm.model_path) == norm_path(&removed_path) {
+        st.llm
+            .release(app, crate::llm::Status::Released, "移除当前自定义模型")
+            .await;
+        s.llm.model_path.clear();
+        s.llm.mmproj_path.clear();
+    }
     st.settings.set(s)?;
     Ok(get_overview(app).await)
 }
@@ -1247,17 +1490,23 @@ pub async fn download_model(
         let _ = st.settings.set(s.clone());
     }
 
-    let models_dir = if s.llm.models_dir.trim().is_empty() {
-        crate::settings::default_engine_dir().join("models")
-    } else {
-        PathBuf::from(&s.llm.models_dir)
-    };
+    let engine_dir = PathBuf::from(&s.llm.server_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(crate::settings::default_engine_dir);
+    let models_dir = engine_dir.join("models");
     std::fs::create_dir_all(&models_dir)?;
 
-    let (final_model_dest, mmproj_dest) = if s.llm.mirror == "modelscope" {
+    let chosen_mirror = if mirror.trim().is_empty() {
+        "modelscope"
+    } else {
+        mirror.trim()
+    };
+
+    let (final_model_dest, mmproj_dest) = if chosen_mirror == "modelscope" {
         download_model_from_modelscope(&models_dir, &model_id, &cancel, &on_prog).await?
     } else {
-        let base_host = if s.llm.mirror == "huggingface" {
+        let base_host = if chosen_mirror == "huggingface" {
             "https://huggingface.co"
         } else {
             "https://hf-mirror.com"
@@ -1280,12 +1529,16 @@ pub async fn download_model(
         }
     };
 
-    // 下载完成后自动切换启用该模型
+    // 下载完成后自动切换启用该模型，并应用该模型的独立参数
     st.llm.release(app, crate::llm::Status::Released, "新模型已就绪").await;
     let mut s2 = st.settings.get();
+    s2.llm.models_dir = models_dir.to_string_lossy().into();
     s2.llm.model_path = final_model_dest.to_string_lossy().into();
     s2.llm.mmproj_path = mmproj_dest.to_string_lossy().into();
     s2.llm.required_vram_mb = if model_id == "q2s" { 1500 } else { 2400 };
+    let params = s2.llm.model_params.get(&model_id).cloned().unwrap_or_default();
+    s2.llm.model_params.entry(model_id.clone()).or_insert_with(|| params.clone());
+    apply_params_to_llm(&mut s2.llm, &params);
     st.settings.set(s2)?;
 
     let _ = on_prog.send(DownloadProgress {
@@ -1527,12 +1780,30 @@ fn extract_archive_to_dir(archive_path: &Path, engine_dir: &Path) -> anyhow::Res
         }
     }
 
-    // 若压缩包内部带有子目录（如 build/bin/llama-server），自动将其内部文件及动态库软链接提升至 engine_dir 根目录
+    // 若压缩包内部带有子目录（如 build/bin/llama-server 或 llama-bXXXX/bin/llama-server），自动将其内部文件及动态库软链接提升至 engine_dir 根目录
     let server_bin = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
     if !engine_dir.join(server_bin).exists() {
-        for sub in ["build/bin", "bin", "llama", "llama-b"] {
-            let sub_dir = engine_dir.join(sub);
-            if sub_dir.join(server_bin).exists() {
+        fn find_bin_parent(cur: &Path, bin_name: &str, depth: usize, max_depth: usize) -> Option<PathBuf> {
+            if cur.join(bin_name).exists() {
+                return Some(cur.to_path_buf());
+            }
+            if depth >= max_depth {
+                return None;
+            }
+            let Ok(rd) = std::fs::read_dir(cur) else { return None };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if let Some(found) = find_bin_parent(&p, bin_name, depth + 1, max_depth) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        if let Some(sub_dir) = find_bin_parent(engine_dir, server_bin, 0, 3) {
+            if sub_dir != engine_dir {
                 if let Ok(rd) = std::fs::read_dir(&sub_dir) {
                     for entry in rd.flatten() {
                         let p = entry.path();
@@ -1543,7 +1814,6 @@ fn extract_archive_to_dir(archive_path: &Path, engine_dir: &Path) -> anyhow::Res
                         }
                     }
                 }
-                break;
             }
         }
     }

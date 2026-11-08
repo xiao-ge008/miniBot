@@ -10,6 +10,7 @@ import type {
   ChatSession,
   ChatStats,
   CloudTestResult,
+  CustomLocalModel,
   DownloadProgress,
   EngineOverview,
   GpuSnapshot,
@@ -19,9 +20,11 @@ import type {
   LocalSendPeer,
   LocalSendProgress,
   LocalSendSelfInfo,
+  ModelParams,
   OcrResult,
   Payload,
   QrResult,
+  ScannedFolderResult,
   SearchHit,
   SearchResponse,
   Settings,
@@ -68,6 +71,13 @@ export const ipc = {
   llmStart: () => invoke<void>('llm_start'),
   engineOverview: () => invoke<EngineOverview>('engine_overview'),
   engineActivateModel: (modelId: string) => invoke<EngineOverview>('engine_activate_model', { modelId }),
+  engineUpdateModelParams: (modelId: string, params: ModelParams) =>
+    invoke<EngineOverview>('engine_update_model_params', { modelId, params }),
+  engineScanCustomFolder: () => invoke<ScannedFolderResult | null>('engine_scan_custom_folder'),
+  engineSaveCustomModel: (model: CustomLocalModel) =>
+    invoke<EngineOverview>('engine_save_custom_model', { model }),
+  engineDeleteCustomModel: (modelId: string) =>
+    invoke<EngineOverview>('engine_delete_custom_model', { modelId }),
   enginePickModelsDir: () => invoke<[EngineOverview, number] | null>('engine_pick_models_dir'),
   engineDownloadModel: (modelId: string, mirror: string, onProgress: (p: DownloadProgress) => void) => {
     const ch = new Channel<DownloadProgress>();

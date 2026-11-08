@@ -336,11 +336,15 @@ impl LlmManager {
             && hw.vram_gb >= 1.8;
         let has_metal = hw.gpu_vendor == "apple";
 
-        let ngl = if has_cuda || has_vulkan || has_metal { "99" } else { "0" };
+        let ngl = if has_cuda || has_vulkan || has_metal {
+            cfg.ngl.clamp(0, 999).to_string()
+        } else {
+            "0".to_string()
+        };
 
         let mut args: Vec<String> = vec![
             "-m".into(), cfg.model_path.clone(),
-            "-ngl".into(), ngl.into(),
+            "-ngl".into(), ngl,
             "-c".into(), cfg.ctx.max(2048).to_string(),
             "-np".into(), "1".into(),
             "--host".into(), "127.0.0.1".into(),
@@ -348,9 +352,10 @@ impl LlmManager {
             "--no-webui".into(),
         ];
 
-        // 在 NVIDIA CUDA 后端下启用量化 KV Cache（对齐 LFM.bat：-ctk q8_0 -ctv q8_0）
-        if has_cuda {
-            args.extend(["-ctk".into(), "q8_0".into(), "-ctv".into(), "q8_0".into()]);
+        // 根据该模型配置的 KV Cache 量化精度传参（默认 q8_0）
+        let kv_q = cfg.kv_quant.trim().to_lowercase();
+        if (has_cuda || has_vulkan || has_metal) && (kv_q == "q8_0" || kv_q == "q4_0") {
+            args.extend(["-ctk".into(), kv_q.clone(), "-ctv".into(), kv_q]);
         }
 
         if !cfg.mmproj_path.is_empty() && std::path::Path::new(&cfg.mmproj_path).exists() {
@@ -771,8 +776,16 @@ impl LlmManager {
         let mut server_tokens = 0u64;
         let mut server_tps = 0.0f64;
 
+        let has_mmproj = !llm_cfg.mmproj_path.trim().is_empty()
+            && std::path::Path::new(&llm_cfg.mmproj_path).exists();
+        let final_messages = if !has_mmproj && messages_have_images(&messages) {
+            convert_vision_messages_via_ocr(messages).await
+        } else {
+            messages
+        };
+
         let mut body = serde_json::json!({
-            "messages": messages,
+            "messages": final_messages,
             "stream": true,
             "cache_prompt": true,
             "timings_per_token": true,

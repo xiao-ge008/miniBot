@@ -232,14 +232,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("miniBot 启动失败");
 
-    app.run(|app, event| {
+    app.run(|app, event| match event {
         // 托盘常驻：关闭所有窗口不退出
-        if let RunEvent::ExitRequested { api, code: None, .. } = event {
+        RunEvent::ExitRequested { api, code: None, .. } => {
             api.prevent_exit();
         }
         // macOS：点击 Dock 栏应用图标时，自动唤起并聚焦 AI 聊天主窗口（若设置/历史页正打开则优先聚焦）
         #[cfg(target_os = "macos")]
-        if let RunEvent::Reopen { .. } = event {
+        RunEvent::Reopen { .. } => {
             for page in ["settings", "history"] {
                 if let Some(w) = app.get_webview_window(page) {
                     if w.is_visible().unwrap_or(false) {
@@ -252,7 +252,8 @@ pub fn run() {
             }
             wins::open_launcher(app);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = app;
+        _ => {
+            let _ = app;
+        }
     });
 }

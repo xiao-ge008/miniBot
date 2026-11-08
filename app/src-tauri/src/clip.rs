@@ -3,7 +3,9 @@ use crate::payload::{Origin, Payload, PayloadKind};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(windows)]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 
 #[derive(Default)]
 pub struct ClipWatcher {

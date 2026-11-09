@@ -473,6 +473,7 @@
     render();
   }
 
+  let currentCursor = '';
   function updateCursor(p: { x: number; y: number }) {
     let c = 'crosshair';
     if (sel && phase === 'selected') {
@@ -481,7 +482,10 @@
       else if (inRect(sel, p.x, p.y)) c = tool ? (tool === 'text' ? 'text' : 'crosshair') : 'move';
       else c = 'default';
     }
-    overlay.style.cursor = c;
+    if (overlay && currentCursor !== c) {
+      currentCursor = c;
+      overlay.style.cursor = c;
+    }
   }
 
   function pushShape(s: Shape) {
@@ -712,17 +716,42 @@
     }
   }
 
-  function close() {
-    const returnToChat = mode === 'chat';
+  function clearCanvases() {
+    if (base && overlay) {
+      const bctx = base.getContext('2d');
+      const octx = overlay.getContext('2d');
+      if (bctx && base.width > 0 && base.height > 0) bctx.clearRect(0, 0, base.width, base.height);
+      if (octx && overlay.width > 0 && overlay.height > 0) octx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+  }
+
+  function resetAll() {
     phase = 'idle';
     sel = null;
     shapes = [];
+    redoStack = [];
     tool = null;
+    activeTool = 'rect';
     toolMenuOpen = false;
     textEdit = null;
     sizeEdit = false;
     beautify = false;
     recMode = false;
+    qrCount = 0;
+    hoverWin = null;
+    currentCursor = '';
+    img = null;
+    pixels = null;
+    if (prevBlobUrl) {
+      URL.revokeObjectURL(prevBlobUrl);
+      prevBlobUrl = '';
+    }
+    clearCanvases();
+  }
+
+  function close() {
+    const returnToChat = mode === 'chat';
+    resetAll();
     ipc.captureClose();
     if (returnToChat) {
       ipc.trigger('launcher');
@@ -802,6 +831,7 @@
 
   // ---------- 加载一帧 ----------
   async function load(p: Payload) {
+    resetAll();
     await loadActions();
     payload = p;
     const f = p.meta!.frame;
@@ -875,7 +905,16 @@
 
   onMount(() => {
     const un = onPayload(load);
-    return () => un.then((f) => f());
+    let unReset: (() => void) | undefined;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('minibot://capture-reset', () => resetAll()).then((fn) => {
+        unReset = fn;
+      });
+    });
+    return () => {
+      un.then((f) => f());
+      if (unReset) unReset();
+    };
   });
 
   // 选区左上角尺寸胶囊（CSS px，与选区左边缘精准对齐）

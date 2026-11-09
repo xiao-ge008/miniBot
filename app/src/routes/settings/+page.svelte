@@ -450,6 +450,34 @@
     root.style.setProperty('--app-line-height', String(Math.max(1.3, Math.min(2.4, s.ui.line_height || 1.68))));
   }
 
+  let checkingPort = $state(false);
+  let portTip = $state('');
+  let portTipOk = $state(true);
+
+  async function handleCheckPort() {
+    if (!s) return;
+    checkingPort = true;
+    portTip = '';
+    try {
+      const res = await ipc.llmCheckPort(s.llm.port || 18080);
+      if (res.available) {
+        portTipOk = true;
+        portTip = `✓ 端口 ${res.port} 可用`;
+      } else {
+        portTipOk = false;
+        portTip = `⚠ 端口 ${res.port} 被占用，已自动建议并切换为 ${res.suggested_port}`;
+        s.llm.port = res.suggested_port;
+        await save();
+      }
+    } catch (e: any) {
+      portTipOk = false;
+      portTip = `检测失败：${e?.message ?? e}`;
+    } finally {
+      checkingPort = false;
+      setTimeout(() => (portTip = ''), 6000);
+    }
+  }
+
   function scheduleAutoSave() {
     previewUi();
     clearTimeout(saveTimer);
@@ -1201,6 +1229,45 @@
                     >
                       ⬇ {overview?.engine_installed ? '更新引擎' : '安装引擎'}
                     </button>
+                  </div>
+                </div>
+
+                <div class="rt-divider"></div>
+
+                <div class="rt-row">
+                  <div class="rt-label-group">
+                    <span class="rt-name">本地推理服务端口</span>
+                    <span class="rt-status-sub">
+                      llama-server 本地监听端口（默认 18080）
+                    </span>
+                    <span
+                      class="help-tip"
+                      data-tip="内置推理引擎服务端口。若提示端口被占用，可在此修改为其他空闲端口（如 18088、28080）或点击检测自动分配。"
+                      >?</span
+                    >
+                  </div>
+                  <div class="port-cfg-group">
+                    <input
+                      type="number"
+                      class="port-input"
+                      min="1024"
+                      max="65535"
+                      bind:value={s.llm.port}
+                      onchange={save}
+                    />
+                    <button
+                      type="button"
+                      class="act-btn light"
+                      onclick={handleCheckPort}
+                      disabled={checkingPort}
+                    >
+                      {checkingPort ? '检测中…' : '检测可用性'}
+                    </button>
+                    {#if portTip}
+                      <span class="port-status-pill" class:ok={portTipOk} class:warn={!portTipOk}>
+                        {portTip}
+                      </span>
+                    {/if}
                   </div>
                 </div>
               </div>
@@ -3793,6 +3860,38 @@
   .api-test-banner.err {
     background: rgba(239, 68, 68, 0.08);
     border: 1px solid rgba(239, 68, 68, 0.3);
+    color: var(--danger);
+  }
+
+  .port-cfg-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .port-input {
+    width: 90px;
+    height: 30px;
+    padding: 0 8px;
+    font-size: 13px;
+    font-family: Consolas, monospace;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--fg);
+    text-align: center;
+  }
+  .port-status-pill {
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+  .port-status-pill.ok {
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
+    color: var(--ok);
+  }
+  .port-status-pill.warn {
+    background: rgba(239, 68, 68, 0.12);
     color: var(--danger);
   }
 </style>

@@ -198,6 +198,29 @@ pub async fn llm_fetch_models(base_url: String, api_key: String) -> R<Vec<String
     crate::llm::fetch_cloud_models(&base_url, &api_key).await
 }
 
+#[derive(serde::Serialize)]
+pub struct PortCheckResult {
+    pub available: bool,
+    pub port: u16,
+    pub suggested_port: u16,
+}
+
+#[tauri::command]
+pub async fn llm_check_port(port: u16) -> R<PortCheckResult> {
+    let available = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        || crate::llm::probe_health(port).await;
+    let suggested = if available {
+        port
+    } else {
+        crate::llm::find_available_port(port.saturating_add(1), 30).unwrap_or(port)
+    };
+    Ok(PortCheckResult {
+        available,
+        port,
+        suggested_port: suggested,
+    })
+}
+
 #[tauri::command]
 pub async fn llm_release(app: AppHandle, st: State<'_, AppState>) -> R<()> {
     st.llm.release(&app, Status::Released, "手动释放").await;

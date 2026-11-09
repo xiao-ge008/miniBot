@@ -71,6 +71,8 @@ export const ipc = {
     invoke<string[]>('llm_fetch_models', { baseUrl, apiKey }),
   llmRelease: () => invoke<void>('llm_release'),
   llmStart: () => invoke<void>('llm_start'),
+  llmCheckPort: (port: number) =>
+    invoke<{ available: boolean; port: number; suggested_port: number }>('llm_check_port', { port }),
   engineOverview: () => invoke<EngineOverview>('engine_overview'),
   engineActivateModel: (modelId: string) => invoke<EngineOverview>('engine_activate_model', { modelId }),
   engineUpdateModelParams: (modelId: string, params: ModelParams) =>

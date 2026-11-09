@@ -15,7 +15,7 @@ mod imp {
         VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
     };
 
     /// 根据 PID 取进程可执行文件名（如 python.exe）
@@ -54,34 +54,84 @@ mod imp {
         if hwnd == 0 {
             return;
         }
-        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
         use windows::Win32::UI::WindowsAndMessaging::{
-            BringWindowToTop, GetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_NOTOPMOST,
-            HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_TOPMOST,
+            BringWindowToTop, SetForegroundWindow, SetWindowPos, HWND_TOPMOST,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
         };
         unsafe {
             let h = HWND(hwnd as *mut _);
-            let was_topmost = (GetWindowLongPtrW(h, GWL_EXSTYLE) & (WS_EX_TOPMOST.0 as isize)) != 0;
-            let fg = GetForegroundWindow();
-            let fg_tid = GetWindowThreadProcessId(fg, None);
-            let cur_tid = GetCurrentThreadId();
-            let attached = if fg_tid != 0 && fg_tid != cur_tid {
-                AttachThreadInput(cur_tid, fg_tid, true).as_bool()
-            } else {
-                false
-            };
+            // 确保窗口置顶并成为前台窗口，避免使用 AttachThreadInput 导致非 UI 线程输入队列死锁与光标高频抖动
             let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
             let _ = BringWindowToTop(h);
             let _ = SetForegroundWindow(h);
-            let _ = SetFocus(Some(h));
-            if !was_topmost {
-                let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            }
-            if attached {
-                let _ = AttachThreadInput(cur_tid, fg_tid, false);
+        }
+    }
+
+    /// Windows 原生极速枚举可见顶层应用窗口矩形（微秒级，避免 xcap::Window::all() 卡顿）
+    pub fn fast_window_rects(fx: i32, fy: i32, fw: u32, fh: u32) -> Vec<[i32; 4]> {
+        use windows::core::BOOL;
+        use windows::Win32::Foundation::{LPARAM, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, IsIconic, IsWindowVisible,
+            GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+        };
+
+        struct EnumCtx {
+            fx: i32,
+            fy: i32,
+            fw: i32,
+            fh: i32,
+            rects: Vec<[i32; 4]>,
+        }
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                let ctx = &mut *(lparam.0 as *mut EnumCtx);
+                if ctx.rects.len() >= 25 {
+                    return BOOL(0);
+                }
+                if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                    return BOOL(1);
+                }
+                let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
+                    return BOOL(1);
+                }
+                if GetWindowTextLengthW(hwnd) == 0 {
+                    return BOOL(1);
+                }
+                let mut r = RECT::default();
+                if GetWindowRect(hwnd, &mut r).is_ok() {
+                    let w = r.right - r.left;
+                    let h = r.bottom - r.top;
+                    if w >= 60 && h >= 60 {
+                        let rx0 = r.left - ctx.fx;
+                        let ry0 = r.top - ctx.fy;
+                        let x0 = rx0.max(0);
+                        let y0 = ry0.max(0);
+                        let x1 = (rx0 + w).min(ctx.fw);
+                        let y1 = (ry0 + h).min(ctx.fh);
+                        if x1 - x0 >= 60 && y1 - y0 >= 60 {
+                            ctx.rects.push([x0, y0, x1 - x0, y1 - y0]);
+                        }
+                    }
+                }
+                BOOL(1)
             }
         }
+
+        let mut ctx = EnumCtx {
+            fx,
+            fy,
+            fw: fw as i32,
+            fh: fh as i32,
+            rects: Vec::with_capacity(25),
+        };
+
+        unsafe {
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
+        }
+        ctx.rects
     }
 
     pub fn cursor_pos() -> (i32, i32) {
@@ -661,6 +711,10 @@ mod imp {
     pub fn show_click_through_rect(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
     pub fn refresh_shell_icon_cache() {}
+
+    pub fn fast_window_rects(_fx: i32, _fy: i32, _fw: u32, _fh: u32) -> Vec<[i32; 4]> {
+        vec![]
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -678,6 +732,10 @@ mod imp {
     }
 
     pub fn focus_hwnd(_hwnd: isize) {}
+
+    pub fn fast_window_rects(_fx: i32, _fy: i32, _fw: u32, _fh: u32) -> Vec<[i32; 4]> {
+        vec![]
+    }
 
     pub fn cursor_pos() -> (i32, i32) {
         (320, 240)

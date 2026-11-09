@@ -205,6 +205,33 @@ pub struct LlmManager {
     yielded_snapshot: Mutex<Option<GpuSnapshot>>,
 }
 
+/// 探测指定端口的本地推理服务是否已在健康运行
+pub async fn probe_health(port: u16) -> bool {
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(600))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let url = format!("http://127.0.0.1:{port}/health");
+    if let Ok(r) = client.get(&url).send().await {
+        return r.status().is_success();
+    }
+    false
+}
+
+/// 从 start 开始顺延探测第一个可绑定的 TCP 端口
+pub fn find_available_port(start: u16, max_attempts: u16) -> Option<u16> {
+    for p in start..start.saturating_add(max_attempts) {
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 impl LlmManager {
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().unwrap_or(Status::Released)
@@ -288,8 +315,28 @@ impl LlmManager {
             }
         }
 
-        if std::net::TcpListener::bind(("127.0.0.1", cfg.port)).is_err() {
-            return Err(LlmError::PortBusy { port: cfg.port });
+        let mut cfg = cfg;
+        let port = cfg.port;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            // 1. 若当前端口已有健康运行的 llama-server，直接复用，秒级响应
+            if probe_health(port).await {
+                crate::log_msg(app, format!("[llm] 端口 {port} 已有健康推理服务运行，直接复用"));
+                *self.yielded_snapshot.lock().unwrap() = None;
+                self.touch();
+                self.set_status(app, Status::Ready, "");
+                return Ok(());
+            }
+
+            // 2. 否则说明端口被非健康/第三方进程占用，自动顺延探测空闲端口，避免报错拦截用户
+            if let Some(avail) = find_available_port(port.saturating_add(1), 30) {
+                crate::log_msg(app, format!("[llm] 默认端口 {port} 被占用，自动顺延切换至可用端口 {avail}"));
+                let mut new_settings = settings.clone();
+                new_settings.llm.port = avail;
+                let _ = st.settings.set(new_settings);
+                cfg.port = avail;
+            } else {
+                return Err(LlmError::PortBusy { port });
+            }
         }
 
         *self.yielded_snapshot.lock().unwrap() = None;

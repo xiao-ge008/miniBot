@@ -736,7 +736,7 @@
         stage = 'idle';
       } else if (e?.kind === 'port_busy') {
         stage = 'error';
-        errorMsg = `内部推理端口 ${e.port} 被占用，请关闭占用该端口的程序或在设置中修改端口。`;
+        errorMsg = `内部推理端口 ${e.port} 被占用，请在「设置 → 模型」中修改端口或点击检测自动分配空闲端口。`;
       } else {
         stage = 'error';
         errorMsg = (e as { message?: string })?.message ?? String(err);

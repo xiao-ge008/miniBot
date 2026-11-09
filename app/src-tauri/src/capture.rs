@@ -1,7 +1,7 @@
 //! 截图：抓取光标所在显示器 → 显示预创建的全屏遮罩窗口
 use crate::payload::{Origin, Payload, PayloadKind};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Frame {
@@ -84,10 +84,10 @@ pub fn start(app: &AppHandle, mode: &str) {
             crate::log_msg(&app, format!("[capture] 已投递截图帧 {}x{} mode={mode}", frame.width, frame.height));
         }
 
-        // 兜底显示：前端解码完会立即调 capture_ready；若隐藏窗口在极个别环境下延迟响应，100ms 后强制显示避免无反应
+        // 容灾兜底：前端解码绘制完会立即主动调用 capture_ready 显示窗口；此处 2500ms 超时仅作为防死锁极端兜底，杜绝过早显示旧帧
         let app_show = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(2500));
             if app_show.state::<crate::AppState>().capture_png.lock().unwrap().is_some() {
                 ready(&app_show);
             }
@@ -110,38 +110,17 @@ fn window_rects(f: &Frame) -> Vec<[i32; 4]> {
     #[cfg(target_os = "macos")]
     {
         let _ = f;
-        return vec![];
+        vec![]
     }
-    #[cfg(not(target_os = "macos"))]
+    // Windows 下使用原生 Win32 枚举，耗时 1~3ms（避免 xcap::Window::all() 跨进程遍历导致数百毫秒卡顿）
+    #[cfg(windows)]
     {
-        let Ok(list) = xcap::Window::all() else { return vec![] };
-        let mut out = vec![];
-        for w in list {
-            if w.is_minimized().unwrap_or(true) {
-                continue;
-            }
-            let title = w.title().unwrap_or_default();
-            if title.is_empty() || title.starts_with("miniBot") {
-                continue;
-            }
-            let (Ok(x), Ok(y), Ok(ww), Ok(hh)) = (w.x(), w.y(), w.width(), w.height()) else { continue };
-            if ww < 40 || hh < 40 {
-                continue;
-            }
-            let rx0 = x - f.x;
-            let ry0 = y - f.y;
-            let rw = ww as i32;
-            let rh = hh as i32;
-            let x0 = rx0.max(0);
-            let y0 = ry0.max(0);
-            let x1 = (rx0 + rw).min(f.width as i32);
-            let y1 = (ry0 + rh).min(f.height as i32);
-            if x1 - x0 < 40 || y1 - y0 < 40 {
-                continue;
-            }
-            out.push([x0, y0, x1 - x0, y1 - y0]);
-        }
-        out
+        crate::winutil::fast_window_rects(f.x, f.y, f.width, f.height)
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    {
+        let _ = f;
+        vec![]
     }
 }
 
@@ -158,16 +137,22 @@ pub fn ready(app: &AppHandle) {
         });
     }
     #[cfg(not(target_os = "macos"))]
-    if let Some(w) = app.get_webview_window("capture") {
-        let _ = w.show();
-        let _ = w.set_always_on_top(true);
-        let _ = w.set_focus();
-        crate::winutil::focus_hwnd(crate::wins::hwnd_of(&w));
+    {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = app2.get_webview_window("capture") {
+                let _ = w.show();
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_focus();
+                crate::winutil::focus_hwnd(crate::wins::hwnd_of(&w));
+            }
+        });
     }
 }
 
 pub fn close(app: &AppHandle) {
     *app.state::<crate::AppState>().capture_png.lock().unwrap() = None;
+    let _ = app.emit_to("capture", "minibot://capture-reset", ());
     #[cfg(target_os = "macos")]
     {
         let app2 = app.clone();
@@ -178,7 +163,12 @@ pub fn close(app: &AppHandle) {
         });
     }
     #[cfg(not(target_os = "macos"))]
-    if let Some(w) = app.get_webview_window("capture") {
-        let _ = w.hide();
+    {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = app2.get_webview_window("capture") {
+                let _ = w.hide();
+            }
+        });
     }
 }

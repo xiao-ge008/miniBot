@@ -168,6 +168,7 @@ pub fn run() {
             commands::llm_chat,
             commands::llm_cancel,
             commands::llm_status,
+            commands::llm_check_port,
             commands::llm_test_api,
             commands::llm_fetch_models,
             commands::llm_release,

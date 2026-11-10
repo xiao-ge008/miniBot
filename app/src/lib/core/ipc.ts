@@ -114,51 +114,95 @@ export const ipc = {
       }
     }
 
-    // 2. 视觉大模型深度整理画面主体与细节
-    let visionDesc = existingVision ?? '';
-    if (!visionDesc) {
-      try {
-        const reqId = uid('vis_kb');
-        const messages: ChatMessage[] = [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image_url',
-                image_url: { url: imageData },
-              },
-              {
-                type: 'text',
-                text: '请对这张图片进行结构化视觉内容整理（用于个人知识库沉淀与以文搜图）：\n1. 画面主体与场景背景；\n2. 核心视觉要素、人物状态、界面布局与关键细节；\n3. 图片所传达的核心信息与主题。\n请条理清晰，简明扼要。',
-              },
-            ],
-          },
-        ];
-        let collected = '';
-        await ipc.llmChat(
-          reqId,
-          messages,
-          (ev) => {
-            if (ev.type === 'delta') collected += ev.text;
-          },
-          {
-            params: {
-              max_tokens: 512,
-              temperature: 0.3,
+    // 2. 视觉大模型深度结构化解析（面向知识库以文搜图的穷尽式多维细节分析）
+    let aiVisionAnalysis = '';
+    const hintContext = existingVision?.trim() ? `【已知前置线索/问答主题】：\n${existingVision.trim()}\n\n` : '';
+    const ocrContext = ocrText.trim() ? `【画面中识别到的文字】：\n${ocrText.slice(0, 500).trim()}\n\n` : '';
+
+    try {
+      const reqId = uid('vis_kb');
+      const detailedPrompt = `你是一位顶尖的图像资产分析与视觉知识库索引专家。请对当前图片进行【深度、详尽、穷尽一切细节】的结构化视觉解析。
+你的解析将直接用于个人知识库以文搜图（自然语言问答与关键词检索）。请务必巨细靡遗地描摹画面中出现的每一个元素与特征，绝对不要概括省略、不要写“等等”或套话，必须确保用户日后搜查任何细节（如“穿着什么衣服”、“什么发型颜色”、“屏幕上的具体文字”、“界面中的某个功能按钮或报错”、“场景里的具体物品道具”）时都能 100% 准确命中！
+
+${hintContext}${ocrContext}
+请严格按照以下 5 个维度展开详尽分析（使用具体丰富的名词与描述性词汇）：
+
+### 1. 画面类型与核心主题
+明确说明画面类型（如：角色立绘/插画、现实人物写真、软件系统UI界面截图、聊天记录、网页截图、图表数据文档、风景建筑等），并详细说明画面的核心内容、主要事件与主题。
+
+### 2. 人物形象与服饰穿搭（若画面含人物/角色，必须极尽详尽，若无则明确注明无）
+- **外貌神态**：性别、大致年龄/体态、发型（长发/短发/双马尾/发饰造型）、发色、眼睛特征/瞳色、五官妆容、面部表情与情绪神态；
+- **全身服饰穿搭（重中之重）**：
+  * 上衣：详细款式（如衬衫、T恤、连帽衫、吊带背心、针织毛衣、西服制服等）、具体颜色、领口形状、袖长款式、印花/纹理/面料材质；
+  * 下装：具体款式（如百褶裙、超短裙、牛仔长裤、西装裤、短裤、工装裤等）、颜色、裙长/裤长、褶皱或特色装饰；
+  * 外套与配饰：外套大衣、领带/领结/领花、帽子、眼镜、腰带、首饰项链、手链手套、发卡发带、包包、手持道具等每一个细节；
+  * 腿部与鞋袜：丝袜/连裤袜/过膝袜/短袜的具体颜色、透明度与长度，鞋子类型（高跟鞋、皮鞋、运动鞋、长筒靴、凉鞋等）；
+- **姿态与动作**：站姿/坐姿/走动姿态、双手摆放位置与微动作、身体朝向与视线注视方向。
+
+### 3. UI 界面、功能模块与文字信息（若为软件截图/网页/聊天记录，若无则跳过）
+- 界面所属软件或系统名称（如 VSCode、微信、Chrome 浏览器、业务后台管理系统等）；
+- 整体窗口布局（顶部菜单导航、左侧边栏树、中央主体展示区、右侧面板、底部状态栏等具体分区）；
+- 界面中出现的关键文字、标题、菜单项、按钮文字、输入框提示、代码片段、错误或警告提示文本（尽可能完整保留原词原文）；
+- 处于激活/选中状态的选项卡、高亮颜色与相关状态指示。
+
+### 4. 场景环境、道具陈设与光影色彩
+- 场景背景：具体环境（室内卧室、现代化办公室、咖啡厅、校园教室、户外自然风景、纯色虚化背景等）；
+- 背景物品：陈列的家具、电脑数码设备、植物花卉、桌上小物件、墙面挂饰等具体道具；
+- 光影与色彩：主色调搭配、光线明暗、色温与整体视觉氛围。
+
+### 5. 检索关键词库 (Search Keywords)
+请在最后列出 20-40 个逗号分隔的高频检索关键词（全面涵盖：角色名/主题名、别名、所有服饰穿搭词、发型发色、具体动作姿势、场景环境词、界面功能词、主色调、同义词与英文对照词等），直接赋能全文检索精准命中。`;
+
+      const messages: ChatMessage[] = [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: imageData },
             },
+            {
+              type: 'text',
+              text: detailedPrompt,
+            },
+          ],
+        },
+      ];
+      let collected = '';
+      await ipc.llmChat(
+        reqId,
+        messages,
+        (ev) => {
+          if (ev.type === 'delta') collected += ev.text;
+        },
+        {
+          params: {
+            max_tokens: 2048,
+            temperature: 0.2,
           },
-        );
-        visionDesc = collected.trim();
-      } catch (e) {
-        console.warn('视觉整理调用异常，降级保存:', e);
-      }
+        },
+      );
+      aiVisionAnalysis = collected.trim();
+    } catch (e) {
+      console.warn('视觉深度解析调用异常，降级保存:', e);
     }
 
-    // 3. 后端保存原图与伴生 vision.md
+    // 组合最终存储的视觉描述（保留前置线索，融合大模型穷尽式细节）
+    let finalVisionDesc = '';
+    if (existingVision?.trim()) {
+      finalVisionDesc += `### 📌 问答/主题摘要\n${existingVision.trim()}\n\n`;
+    }
+    if (aiVisionAnalysis) {
+      finalVisionDesc += aiVisionAnalysis;
+    } else if (existingVision?.trim()) {
+      finalVisionDesc = existingVision.trim();
+    }
+
+    // 3. 后端保存原图与伴生同名 Markdown 文件
     const savedPath = await ipc.kbSaveImage(
       imageData,
       ocrText || undefined,
-      visionDesc || undefined,
+      finalVisionDesc || undefined,
       sourceApp ?? undefined,
     );
 
@@ -169,7 +213,7 @@ export const ipc = {
       /* 忽略索引异常 */
     }
 
-    return { path: savedPath, ocr: ocrText, vision: visionDesc };
+    return { path: savedPath, ocr: ocrText, vision: finalVisionDesc };
   },
   saveToKnowledge: async (p: Payload): Promise<string> => {
     if (p.kind === 'image' && p.image) {

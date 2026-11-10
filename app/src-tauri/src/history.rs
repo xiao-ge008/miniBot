@@ -62,6 +62,8 @@ pub struct ChatMessageRecord {
     #[serde(default)]
     pub stats: Option<crate::llm::ChatStats>,
     #[serde(default)]
+    pub kb_hits: Option<Vec<crate::kb::KbSearchHit>>,
+    #[serde(default)]
     pub ts: i64,
 }
 
@@ -99,12 +101,14 @@ impl History {
                content TEXT NOT NULL,
                attachments_json TEXT NOT NULL DEFAULT '[]',
                stats_json TEXT,
+               kb_hits_json TEXT,
                ts INTEGER NOT NULL,
                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE);
              CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id ASC);",
         )?;
-        // 兼容旧版数据库平滑新增 stats_json 列
+        // 兼容旧版数据库平滑新增 stats_json 和 kb_hits_json 列
         let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN stats_json TEXT", []);
+        let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN kb_hits_json TEXT", []);
         Ok(Self { conn: Mutex::new(conn), img_dir })
     }
 
@@ -233,7 +237,7 @@ impl History {
     pub fn chat_message_list(&self, session_id: &str) -> anyhow::Result<Vec<ChatMessageRecord>> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c.prepare(
-            "SELECT id, session_id, role, content, attachments_json, stats_json, ts
+            "SELECT id, session_id, role, content, attachments_json, stats_json, ts, kb_hits_json
              FROM chat_messages
              WHERE session_id=?1
              ORDER BY id ASC",
@@ -245,6 +249,10 @@ impl History {
             let stats: Option<crate::llm::ChatStats> = stats_str
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
+            let kb_hits_str: Option<String> = r.get(7).ok().flatten();
+            let kb_hits: Option<Vec<crate::kb::KbSearchHit>> = kb_hits_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
             Ok(ChatMessageRecord {
                 id: r.get(0)?,
                 session_id: r.get(1)?,
@@ -252,6 +260,7 @@ impl History {
                 content: r.get(3)?,
                 attachments,
                 stats,
+                kb_hits,
                 ts: r.get(6)?,
             })
         })?;
@@ -265,14 +274,16 @@ impl History {
         content: &str,
         attachments: &[ChatAttachment],
         stats: Option<&crate::llm::ChatStats>,
+        kb_hits: Option<&[crate::kb::KbSearchHit]>,
     ) -> anyhow::Result<i64> {
         let now = chrono::Utc::now().timestamp();
         let att_json = serde_json::to_string(attachments).unwrap_or_else(|_| "[]".to_string());
         let stats_json = stats.and_then(|s| serde_json::to_string(s).ok());
+        let kb_hits_json = kb_hits.and_then(|h| serde_json::to_string(h).ok());
         let c = self.conn.lock().unwrap();
         c.execute(
-            "INSERT INTO chat_messages(session_id, role, content, attachments_json, stats_json, ts) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, role, content, att_json, stats_json, now],
+            "INSERT INTO chat_messages(session_id, role, content, attachments_json, stats_json, kb_hits_json, ts) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![session_id, role, content, att_json, stats_json, kb_hits_json, now],
         )?;
         let msg_id = c.last_insert_rowid();
 

@@ -11,6 +11,8 @@
 
   let payload = $state<Payload | null>(null);
   let copied = $state(false);
+  let savedKb = $state(false);
+  let savingKb = $state(false);
   let hovering = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let hideMs = 5000;
@@ -109,6 +111,25 @@
     ipc.hideSelf();
   }
 
+  async function doSaveKb() {
+    if (!payload || savingKb) return;
+    clearTimeout(timer);
+    if (tts.activeId === 'tip-speak') stopSpeak();
+    savingKb = true;
+    try {
+      await ipc.saveToKnowledge(payload);
+      savedKb = true;
+      setTimeout(() => {
+        savedKb = false;
+        ipc.hideSelf();
+      }, 800);
+    } catch (e) {
+      console.error('存入知识库失败:', e);
+    } finally {
+      savingKb = false;
+    }
+  }
+
   onMount(() => {
     ipc.getSettings().then((s) => (hideMs = Math.max(s.tip.hide_ms, 4500)));
     const un = onPayload(show);
@@ -169,6 +190,9 @@
           <button class="item" onclick={doLocalSend} title="通过 LocalSend 发送图片到局域网在线设备">
             <span>发送</span>
           </button>
+          <button class="item" class:ok={savedKb} onclick={doSaveKb} disabled={savingKb} title="存入本地知识库（自动提取 OCR 与视觉智能整理）">
+            <span>{savingKb ? '整理中…' : savedKb ? '已存入' : '存知识库'}</span>
+          </button>
           <button class="item" class:ok={copied} onclick={doCopy} title="复制图片">
             <span>{copied ? '已复制' : '复制'}</span>
           </button>
@@ -208,6 +232,9 @@
           />
           <button class="item" onclick={doLocalSend} title="通过 LocalSend 发送内容到局域网在线设备">
             <span>发送</span>
+          </button>
+          <button class="item" class:ok={savedKb} onclick={doSaveKb} disabled={savingKb} title="存入本地知识库 (按日期合并)">
+            <span>{savingKb ? '保存中…' : savedKb ? '已存入' : '存知识库'}</span>
           </button>
           <button class="item" class:ok={copied} onclick={doCopy} title="复制到剪贴板">
             <span>{copied ? '已复制' : '复制'}</span>

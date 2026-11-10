@@ -11,11 +11,18 @@ import type {
   ChatStats,
   CloudTestResult,
   CustomLocalModel,
+  DocFileInfo,
+  DocWriteResult,
   DownloadProgress,
   EngineOverview,
   GpuSnapshot,
   HistoryEntry,
   ImageSearchResponse,
+  KbSearchHit,
+  KbSearchResponse,
+  KbStats,
+  KbSyncSummary,
+  LayaStatus,
   LocalSendItem,
   LocalSendPeer,
   LocalSendProgress,
@@ -52,6 +59,134 @@ export const ipc = {
   saveSettings: (settings: Settings) => invoke<string[]>('save_settings', { settings }),
   hotkeysSuspend: (suspend: boolean) => invoke<void>('hotkeys_suspend', { suspend }),
   appInfo: () => invoke<AppInfo>('app_info'),
+
+  // 知识库 API
+  kbSaveClip: (text: string, sourceApp?: string, url?: string) =>
+    invoke<string>('kb_save_clip', { text, sourceApp: sourceApp ?? null, url: url ?? null }),
+  kbSaveImage: (imgData: string, ocrText?: string, visionDesc?: string, source?: string) =>
+    invoke<string>('kb_save_image', {
+      imgData,
+      ocrText: ocrText ?? null,
+      visionDesc: visionDesc ?? null,
+      source: source ?? null,
+    }),
+  kbSaveWeb: (url: string, content: string, title?: string) =>
+    invoke<string>('kb_save_web', { url, content, title: title ?? null }),
+  kbGetStats: () => invoke<KbStats>('kb_get_stats'),
+  kbOpenFolder: () => invoke<void>('kb_open_folder'),
+  kbPickFolder: () => invoke<KbSyncSummary | null>('kb_pick_folder'),
+  kbSyncIndex: () => invoke<KbSyncSummary>('kb_sync_index'),
+  kbLayaStatus: () => invoke<LayaStatus>('kb_laya_status'),
+  kbDownloadLaya: (onProgress: (p: DownloadProgress) => void) => {
+    const ch = new Channel<DownloadProgress>();
+    ch.onmessage = onProgress;
+    return invoke<LayaStatus>('kb_download_laya', { onProgress: ch });
+  },
+  kbDeleteLaya: () => invoke<void>('kb_delete_laya'),
+  kbOpenFile: (path: string) => invoke<void>('kb_open_file', { path }),
+  kbRevealFile: (path: string) => invoke<void>('kb_reveal_file', { path }),
+  kbReadImageBase64: (path: string) => invoke<string>('kb_read_image_base64', { path }),
+  docRead: (path: string) => invoke<DocFileInfo>('doc_read_file', { path }),
+  docWrite: (path: string, content: string) =>
+    invoke<DocWriteResult>('doc_write_file', { path, content }),
+  docOpenEditor: (path?: string | null, query?: string | null) =>
+    invoke<void>('doc_open_editor', { path: path ?? null, query: query ?? null }),
+  docGetPending: () => invoke<[string, string | null] | null>('doc_get_pending'),
+  docSetContextMenu: (enable: boolean) =>
+    invoke<boolean>('doc_set_context_menu', { enable }),
+  docIsContextMenuRegistered: () => invoke<boolean>('doc_is_context_menu_registered'),
+  kbSearch: (query: string, limit = 20) =>
+    invoke<KbSearchResponse>('kb_search', { query, limit }),
+  saveImageToKnowledgeWithVision: async (
+    imageData: string,
+    sourceApp?: string | null,
+    existingOcr?: string | null,
+    existingVision?: string | null,
+  ): Promise<{ path: string; ocr: string; vision: string }> => {
+    // 1. OCR 提取文字
+    let ocrText = existingOcr ?? '';
+    if (!ocrText) {
+      try {
+        const ocrRes = await ipc.ocrImage(imageData);
+        ocrText = ocrRes.text ?? '';
+      } catch {
+        /* OCR 容错 */
+      }
+    }
+
+    // 2. 视觉大模型深度整理画面主体与细节
+    let visionDesc = existingVision ?? '';
+    if (!visionDesc) {
+      try {
+        const reqId = uid('vis_kb');
+        const messages: ChatMessage[] = [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image_url',
+                image_url: { url: imageData },
+              },
+              {
+                type: 'text',
+                text: '请对这张图片进行结构化视觉内容整理（用于个人知识库沉淀与以文搜图）：\n1. 画面主体与场景背景；\n2. 核心视觉要素、人物状态、界面布局与关键细节；\n3. 图片所传达的核心信息与主题。\n请条理清晰，简明扼要。',
+              },
+            ],
+          },
+        ];
+        let collected = '';
+        await ipc.llmChat(
+          reqId,
+          messages,
+          (ev) => {
+            if (ev.type === 'delta') collected += ev.text;
+          },
+          {
+            params: {
+              max_tokens: 512,
+              temperature: 0.3,
+            },
+          },
+        );
+        visionDesc = collected.trim();
+      } catch (e) {
+        console.warn('视觉整理调用异常，降级保存:', e);
+      }
+    }
+
+    // 3. 后端保存原图与伴生 vision.md
+    const savedPath = await ipc.kbSaveImage(
+      imageData,
+      ocrText || undefined,
+      visionDesc || undefined,
+      sourceApp ?? undefined,
+    );
+
+    // 4. 自动增量构建索引
+    try {
+      await ipc.kbSyncIndex();
+    } catch {
+      /* 忽略索引异常 */
+    }
+
+    return { path: savedPath, ocr: ocrText, vision: visionDesc };
+  },
+  saveToKnowledge: async (p: Payload): Promise<string> => {
+    if (p.kind === 'image' && p.image) {
+      const res = await ipc.saveImageToKnowledgeWithVision(
+        p.image,
+        p.origin,
+        p.text ?? undefined,
+        p.meta?.vision_desc as string | undefined,
+      );
+      return res.path;
+    } else if (p.kind === 'url' && p.text) {
+      return await ipc.kbSaveWeb(p.text, p.text, p.meta?.title as string | undefined);
+    } else if (p.text) {
+      return await ipc.kbSaveClip(p.text, p.origin, (p.meta?.url as string) ?? undefined);
+    }
+    throw new Error('不支持的内容类型');
+  },
 
   llmChat: (
     id: string,
@@ -138,7 +273,16 @@ export const ipc = {
     content: string,
     attachments: ChatAttachment[] = [],
     stats?: ChatStats | null,
-  ) => invoke<number>('chat_message_add', { sessionId, role, content, attachments, stats: stats ?? null }),
+    kbHits?: KbSearchHit[] | null,
+  ) =>
+    invoke<number>('chat_message_add', {
+      sessionId,
+      role,
+      content,
+      attachments,
+      stats: stats ?? null,
+      kbHits: kbHits ?? null,
+    }),
   chatMessageDeleteFrom: (sessionId: string, fromId: number) =>
     invoke<void>('chat_message_delete_from', { sessionId, fromId }),
 
@@ -225,6 +369,10 @@ export function onChatCapture(cb: (data: { image: string; auto_send: boolean }) 
 
 export function onOutsideClick(cb: () => void) {
   return listen('minibot://outside-click', () => cb());
+}
+
+export function onDocOpen(cb: (payload: { path?: string | null; query?: string | null }) => void) {
+  return listen<{ path?: string | null; query?: string | null }>('minibot://open-doc', (ev) => cb(ev.payload));
 }
 
 export function onTtsEvent(cb: (data: { action: string; id?: string; token?: string }) => void) {

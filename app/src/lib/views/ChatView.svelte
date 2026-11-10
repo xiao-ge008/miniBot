@@ -124,6 +124,32 @@
     setTimeout(() => (copied = false), 1200);
   }
 
+  let savedKb = $state(false);
+  let savingKb = $state(false);
+
+  async function doSaveKb() {
+    if (savingKb) return;
+    savingKb = true;
+    try {
+      if (payload.image) {
+        await ipc.saveImageToKnowledgeWithVision(
+          payload.image,
+          payload.origin,
+          payload.text,
+          cleanOutput || undefined,
+        );
+      } else if (cleanOutput || payload.text) {
+        await ipc.kbSaveClip(cleanOutput || payload.text || '', payload.origin);
+      }
+      savedKb = true;
+      setTimeout(() => (savedKb = false), 2500);
+    } catch (e) {
+      console.error('存入知识库失败:', e);
+    } finally {
+      savingKb = false;
+    }
+  }
+
   async function prepareText(): Promise<{ text: string; image: string | null } | null> {
     let text = inputText;
     let image = payload.image ?? null;
@@ -329,12 +355,20 @@
 
   onMount(() => {
     start();
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        doSaveKb();
+      }
+    };
+    window.addEventListener('keydown', onKey);
     const unS = onLlmStatus((s) => {
       if (!userChangedReasoning && s.reasoning_effort) {
         reasoningEffort = normalizeReasoningEffort(s.reasoning_effort, 'off');
       }
     });
     return () => {
+      window.removeEventListener('keydown', onKey);
       unS.then((f) => f());
       cancel();
       stopSpeak();
@@ -376,6 +410,15 @@
             <option value={lv.value}>💭 思考：{lv.shortLabel}</option>
           {/each}
         </select>
+        <button
+          class="ctx-kb-btn"
+          class:ok={savedKb}
+          onclick={doSaveKb}
+          disabled={savingKb}
+          title="存入知识库：自动提取 OCR 并进行视觉整理生成伴生文档 (快捷键 Ctrl+K)"
+        >
+          <span>{savingKb ? '整理中…' : savedKb ? '✓ 已存入' : '🧠 存知识库'}</span>
+        </button>
       </div>
 
       {#if payload.image}
@@ -542,6 +585,15 @@
             {#if canReplace}
               <button class="act-btn primary" onclick={() => ipc.replaceText(payload.source_hwnd, cleanOutput)} title="Ctrl+Enter">替换原文</button>
             {/if}
+            <button
+              class="act-btn"
+              class:copied={savedKb}
+              onclick={doSaveKb}
+              disabled={savingKb}
+              title="将本次原图与 AI 视觉分析沉淀存入个人知识库"
+            >
+              {savingKb ? '保存中…' : savedKb ? '✓ 已存入' : '存知识库'}
+            </button>
           {/if}
           <button
             class="act-btn ghost"
@@ -648,6 +700,30 @@
     border-color: color-mix(in srgb, var(--accent-blue) 45%, transparent);
     background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
     font-weight: 500;
+  }
+  .ctx-kb-btn {
+    border: 1px solid var(--border);
+    background: var(--panel-elevated);
+    color: var(--fg);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 7px;
+    height: 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+  }
+  .ctx-kb-btn:hover:not(:disabled) {
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+    background: var(--hover);
+  }
+  .ctx-kb-btn.ok {
+    background: rgba(34, 197, 94, 0.12);
+    border-color: var(--ok);
+    color: var(--ok);
   }
   .img-wrap {
     margin-top: 6px;

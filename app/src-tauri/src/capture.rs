@@ -37,6 +37,15 @@ pub fn start(app: &AppHandle, mode: &str) {
             return;
         };
         let Ok(img) = mon.capture_image() else {
+            #[cfg(target_os = "macos")]
+            {
+                let has_perm = crate::winutil::check_screen_capture_permission();
+                crate::log_msg(&app, format!("[capture] capture_image 失败，macOS 屏幕捕获权限状态: {has_perm}"));
+                if !has_perm {
+                    let _ = crate::winutil::request_screen_capture_permission();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             crate::log_msg(&app, "[capture] capture_image 失败");
             return;
         };

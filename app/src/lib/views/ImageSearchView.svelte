@@ -28,6 +28,8 @@
   let busyIdx = $state<string | null>(null);
   let cache = $state<Partial<Record<EngineId, ImageSearchResponse>>>({});
   let sharedExternalUrls = $state<ImageSearchExternalUrl[]>([]);
+  let savingKb = $state(false);
+  let savedKb = $state(false);
 
   const curResp = $derived(cache[activeEngine] ?? null);
   const items = $derived<ImageSearchItem[]>(curResp?.items ?? []);
@@ -85,7 +87,49 @@
 
   onMount(() => {
     runSearch('baidu');
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        saveOriginToKb();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   });
+
+  async function saveOriginToKb() {
+    if (savingKb || !payload.image) return;
+    savingKb = true;
+    try {
+      flash('🧠 正在进行视觉整理并存入知识库…');
+      const extraVision = guess ? `搜图识别主题：${guess}` : undefined;
+      await ipc.saveImageToKnowledgeWithVision(payload.image, 'image_search', null, extraVision);
+      savedKb = true;
+      flash('✓ 原图与视觉解析已存入知识库！');
+      setTimeout(() => (savedKb = false), 2500);
+    } catch (e) {
+      flash(`存库失败: ${e}`);
+    } finally {
+      savingKb = false;
+    }
+  }
+
+  async function saveSingleItemToKb(item: ImageSearchItem, idx: number) {
+    const key = `kb-${idx}`;
+    if (busyIdx) return;
+    busyIdx = key;
+    try {
+      flash('🧠 正在下载并存入知识库…');
+      const dataUri = await ipc.fetchRemoteImage(item.image_url);
+      const desc = `搜图匹配图：${item.title || ''}\n来源：${item.source_url || ''}`;
+      await ipc.saveImageToKnowledgeWithVision(dataUri, 'image_search_item', null, desc);
+      flash(`✓ 已将搜出的图片存入知识库！`);
+    } catch (e) {
+      flash(`存库失败：${e}`);
+    } finally {
+      busyIdx = null;
+    }
+  }
 
   async function saveSingleImage(item: ImageSearchItem, idx: number) {
     const key = `save-${idx}`;
@@ -174,6 +218,16 @@
         </button>
       {/each}
     </div>
+
+    <button
+      class="top-kb-btn"
+      class:ok={savedKb}
+      disabled={savingKb || !payload.image}
+      onclick={saveOriginToKb}
+      title="存入知识库：自动提取 OCR 并进行视觉整理生成伴生文档 (快捷键 Ctrl+K)"
+    >
+      <span>{savingKb ? '整理中…' : savedKb ? '✓ 已存入' : '🧠 存知识库'}</span>
+    </button>
   </div>
 
   <!-- 主体：图片墙瀑布流 -->
@@ -265,6 +319,18 @@
                   <span>{busyIdx === `save-${idx}` ? '…' : '保存'}</span>
                 </button>
                 <button
+                  class="act-btn"
+                  disabled={busyIdx === `kb-${idx}`}
+                  title="将此张搜到的图片及其出处存入个人知识库"
+                  onclick={() => saveSingleItemToKb(item, idx)}
+                >
+                  <svg viewBox="0 0 16 16" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="8" cy="8" r="6" />
+                    <path d="M8 5v6M5 8h6" />
+                  </svg>
+                  <span>{busyIdx === `kb-${idx}` ? '…' : '存库'}</span>
+                </button>
+                <button
                   class="act-btn chat-btn"
                   disabled={busyIdx === `chat-${idx}`}
                   title="将此张图片发送到 AI 聊天窗口"
@@ -297,6 +363,15 @@
     {/if}
     <span class="spacer"></span>
     {#if payload.image}
+      <button
+        class="ext-btn"
+        class:primary-soft={!savedKb}
+        disabled={savingKb}
+        title="将原截图及搜图结果进行视觉整理后存入知识库 (Ctrl+K)"
+        onclick={saveOriginToKb}
+      >
+        {savingKb ? '🧠 整理存库中…' : savedKb ? '✓ 原图已存入' : '🧠 原图存知识库'}
+      </button>
       <button
         class="ext-btn primary-soft"
         title="将原截图发送到 AI 聊天窗口提问"
@@ -419,6 +494,28 @@
   .eng-tab.on {
     background: var(--accent);
     color: var(--accent-fg);
+  }
+  .top-kb-btn {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--fg);
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 3px 9px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .top-kb-btn:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+  }
+  .top-kb-btn.ok {
+    background: rgba(34, 197, 94, 0.12);
+    border-color: var(--ok);
+    color: var(--ok);
   }
 
   /* 瀑布流图片墙 */

@@ -12,6 +12,8 @@
     CustomLocalModel,
     DownloadProgress,
     EngineOverview,
+    KbStats,
+    LayaStatus,
     ModelCard,
     ModelParams,
     ScannedFolderResult,
@@ -24,7 +26,7 @@
 
   const win = getCurrentWindow();
 
-  const TABS = ['模型', '外观与常规', '全局热键', '划词与复制', 'OpenAI 网关', '历史清理', '版本更新'] as const;
+  const TABS = ['模型', '个人知识库', '外观与常规', '全局热键', '划词与复制', 'OpenAI 网关', '历史清理', '版本更新'] as const;
 
   interface ApiPresetModel {
     id: string;
@@ -227,6 +229,124 @@
   let customModelInputMode = $state(false);
   let autoFetchTimer: ReturnType<typeof setTimeout> | undefined;
   let ttsVoices = $state<VoiceOption[]>([]);
+
+  // 个人知识库状态
+  let kbStats = $state<KbStats | null>(null);
+  let layaStatus = $state<LayaStatus | null>(null);
+  let layaDownloading = $state(false);
+  let layaDlProgress = $state<DownloadProgress | null>(null);
+  let layaDlError = $state('');
+  let mdContextMenuRegistered = $state(false);
+
+  async function handleToggleMdContextMenu() {
+    try {
+      const next = !mdContextMenuRegistered;
+      const res = await ipc.docSetContextMenu(next);
+      mdContextMenuRegistered = res;
+      flashMsg(res ? '✓ 已注册系统右键菜单「使用 miniBot 编辑 Markdown」' : '✓ 已移除右键菜单');
+    } catch (e: any) {
+      flashMsg(`操作失败: ${e?.message ?? e}`);
+    }
+  }
+
+  async function refreshKbStats() {
+    try {
+      kbStats = await ipc.kbGetStats();
+    } catch (e) {
+      console.error('获取知识库统计失败:', e);
+    }
+  }
+
+  async function refreshLayaStatus() {
+    try {
+      layaStatus = await ipc.kbLayaStatus();
+      if (s && layaStatus) {
+        s.knowledge.laya_enabled = layaStatus.enabled;
+      }
+    } catch (e) {
+      console.error('获取 Laya 状态失败:', e);
+    }
+  }
+
+  let kbSyncing = $state(false);
+
+  async function handlePickKbFolder() {
+    if (kbSyncing) return;
+    try {
+      kbSyncing = true;
+      const res = await ipc.kbPickFolder();
+      if (res && s) {
+        s.knowledge.base_path = res.folder_path;
+        await refreshKbStats();
+        flashMsg(
+          `✓ 已切换至新文件夹，自动扫描并索引了 ${res.scanned_docs} 篇文档 (共 ${res.total_chunks} 个知识切片)`,
+          5000,
+        );
+      }
+    } catch (e) {
+      flashMsg(`切换目录失败: ${e}`, 4000);
+    } finally {
+      kbSyncing = false;
+    }
+  }
+
+  async function handleSyncKbIndex() {
+    if (kbSyncing) return;
+    kbSyncing = true;
+    try {
+      flashMsg('🔍 正在全量扫描文本并建立索引…', 2500);
+      const res = await ipc.kbSyncIndex();
+      await refreshKbStats();
+      flashMsg(
+        `✓ 索引同步完成：已索引 ${res.scanned_docs} 篇文档 (共 ${res.total_chunks} 个知识切片)`,
+        4500,
+      );
+    } catch (e) {
+      flashMsg(`索引扫描失败: ${e}`, 4000);
+    } finally {
+      kbSyncing = false;
+    }
+  }
+
+  async function handleDownloadLaya() {
+    if (layaDownloading) return;
+    layaDownloading = true;
+    layaDlError = '';
+    layaDlProgress = {
+      target: 'laya',
+      stage: 'downloading',
+      file: 'model.safetensors',
+      downloaded_mb: 0,
+      total_mb: 840,
+      percent: 1,
+      message: '正在连接下载源…',
+    };
+    try {
+      layaStatus = await ipc.kbDownloadLaya((p) => {
+        layaDlProgress = p;
+      });
+      if (s) s.knowledge.laya_enabled = true;
+      flashMsg('✓ Laya 加速模型已下载就绪并自动启用');
+    } catch (e) {
+      layaDlError = `下载失败: ${e}`;
+      flashMsg(`下载失败: ${e}`, 4000);
+    } finally {
+      layaDownloading = false;
+      await refreshLayaStatus();
+    }
+  }
+
+  async function handleDeleteLaya() {
+    if (!confirm('确定要删除本地 Laya 加速模型以释放磁盘空间吗？')) return;
+    try {
+      await ipc.kbDeleteLaya();
+      if (s) s.knowledge.laya_enabled = false;
+      await refreshLayaStatus();
+      flashMsg('✓ 已移除加速模型并释放空间');
+    } catch (e) {
+      flashMsg(`删除失败: ${e}`);
+    }
+  }
 
   // 版本检测与在线自动更新状态
   let updateInfo = $state<UpdateInfo | null>(null);
@@ -512,6 +632,15 @@
       volume: loaded.tts?.volume || '+0%',
       auto_lang: typeof loaded.tts?.auto_lang === 'boolean' ? loaded.tts.auto_lang : true,
     };
+    if (!loaded.knowledge) {
+      loaded.knowledge = {
+        base_path: '',
+        laya_enabled: false,
+        auto_search: false,
+        candidate_count: 20,
+        top_k: 5,
+      };
+    }
     s = loaded;
     info = await ipc.appInfo();
     ttsVoices = await ipc.ttsVoices().catch(() => []);
@@ -521,6 +650,9 @@
     overview = await ipc.engineOverview();
     triggerAutoFetchModels(120);
     handleCheckUpdate(false);
+    refreshKbStats();
+    refreshLayaStatus();
+    ipc.docIsContextMenuRegistered().then((r) => (mdContextMenuRegistered = r));
   }
 
   async function handleCheckUpdate(manual = true) {
@@ -1967,6 +2099,214 @@
               </div>
             </section>
           {/if}
+
+        {:else if tab === '个人知识库'}
+          <section class="group">
+            <div class="group-title">知识库存储与目录</div>
+            <div class="card">
+              <div class="row-item-vertical">
+                <div class="row-meta">
+                  <div class="row-label">存储根目录</div>
+                  <div class="row-desc">所有划词笔记、图片资产（原图与伴生解析）、网页快照均保存在此目录下。支持随时切换任意已有笔记/文档文件夹。</div>
+                </div>
+                <div class="path-input-group">
+                  <input
+                    type="text"
+                    class="txt path-input"
+                    bind:value={s.knowledge.base_path}
+                    placeholder="留空将默认存入系统标准路径"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-action"
+                    onclick={handlePickKbFolder}
+                    disabled={kbSyncing}
+                    title="选择自定义文件夹作为个人知识库（系统将自动递归扫描新文件夹的所有文本并建立索引）"
+                  >
+                    {kbSyncing ? '⏳ 正在扫描…' : '📁 更改文件夹'}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-action"
+                    onclick={handleSyncKbIndex}
+                    disabled={kbSyncing}
+                    title="手动重新递归扫描当前目录下的所有 Markdown、TXT、JSON、CSV 文档并刷新倒排索引"
+                  >
+                    {kbSyncing ? '⏳ 正在扫描…' : '🔄 重新扫描索引'}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-action"
+                    onclick={() => ipc.kbOpenFolder()}
+                    title="在系统资源管理器中打开知识库目录"
+                  >
+                    📂 打开文件夹
+                  </button>
+                </div>
+              </div>
+
+              {#if kbStats}
+                <div class="kb-stats-grid">
+                  <div class="stat-box">
+                    <div class="stat-num">{kbStats.notes_count}</div>
+                    <div class="stat-lbl">文本文档总数</div>
+                  </div>
+                  <div class="stat-box highlight-box">
+                    <div class="stat-num highlight-num">{kbStats.chunks_count}</div>
+                    <div class="stat-lbl">已索引知识切片</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-num">{kbStats.images_count}</div>
+                    <div class="stat-lbl">图片资产组</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-num">{kbStats.web_count}</div>
+                    <div class="stat-lbl">网页快照文章</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-num">{(kbStats.total_size_bytes / 1024 / 1024).toFixed(1)} MB</div>
+                    <div class="stat-lbl">占用本地空间</div>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          </section>
+
+          <section class="group">
+            <div class="group-title">检索与交互策略</div>
+            <div class="card">
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">聊天框默认开启知识库</div>
+                  <div class="row-desc">开启后，每次唤出聊天窗口时【🧠 知识库】按钮默认处于点亮激活状态</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" bind:checked={s.knowledge.auto_search} />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">单次问答候选切片预算</div>
+                  <div class="row-desc">SQLite FTS5 毫秒级初步召回的候选文档片段数量（推荐 10 ~ 30）</div>
+                </div>
+                <input
+                  type="number"
+                  class="txt num-input"
+                  min="5"
+                  max="50"
+                  bind:value={s.knowledge.candidate_count}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section class="group">
+            <div class="group-title">⚡ 检索加速引擎 (开源 Jev)</div>
+            <div class="card">
+              <div class="laya-header">
+                <div class="laya-title-row">
+                  <div class="row-label">
+                    <span>Laya 0.4B 非自回归极速决策引擎</span>
+                    <span class="tag-opt">进阶加速</span>
+                  </div>
+                  {#if layaStatus?.installed}
+                    <span class="status-badge ok">🟢 已就绪 ({layaStatus.size_mb} MB)</span>
+                  {:else}
+                    <span class="status-badge dim">⚪ 未下载 (约 840 MB)</span>
+                  {/if}
+                </div>
+
+                <div class="laya-highlight-tip">
+                  🚀 <strong>建议下载加速模型</strong>：下载加速模型后，<strong>多跳推理更加准确，速度更快</strong>！证据判定延迟由 500ms 降至 30ms（非自回归极速前向）。模型统一保存在 <code>llama/models/laya/</code> 目录下。
+                </div>
+              </div>
+
+              <!-- 下载与操作控制区 -->
+              <div class="laya-action-row">
+                {#if layaDownloading}
+                  <div class="laya-dl-box">
+                    <div class="laya-dl-header">
+                      <span>{layaDlProgress?.message || '正在下载加速模型…'}</span>
+                      <span class="dl-num">{layaDlProgress?.percent || 0}%</span>
+                    </div>
+                    <div class="progress-bar">
+                      <div class="progress-fill" style="width: {layaDlProgress?.percent || 0}%"></div>
+                    </div>
+                    <div class="laya-dl-foot">
+                      <span>已下载：{layaDlProgress?.downloaded_mb || 0} MB / {layaDlProgress?.total_mb || 840} MB</span>
+                      {#if layaDlError}<span class="dl-err">{layaDlError}</span>{/if}
+                    </div>
+                  </div>
+                {:else if layaStatus?.installed}
+                  <div class="laya-installed-box">
+                    <div class="row-meta">
+                      <div class="row-label">启用极速判决加速</div>
+                      <div class="row-desc">开启后所有知识库问答优先通过 Laya 进行 30ms 极速证据打分</div>
+                    </div>
+                    <div class="act-group">
+                      <label class="switch">
+                        <input type="checkbox" bind:checked={s.knowledge.laya_enabled} />
+                        <span class="slider"></span>
+                      </label>
+                      <button type="button" class="btn danger-btn" onclick={handleDeleteLaya} title="删除加速模型以释放约 800MB 磁盘空间">
+                        🗑️ 释放空间
+                      </button>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="laya-download-trigger">
+                    <button type="button" class="primary laya-dl-btn" onclick={handleDownloadLaya}>
+                      ⚡ 一键下载加速模型 (840 MB)
+                    </button>
+                    <span class="laya-dl-subhint">💡 下载后更加准确，速度更快 (延迟低至 30ms)</span>
+                    {#if layaDlError}
+                      <span class="dl-err">{layaDlError}</span>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+
+              <div class="sub-tip-box">
+                <p>💡 <strong>运行模式说明</strong>：miniBot 知识库天然支持零新增模型运行。如果不下载此项，知识库将直接借用你本地已有的 LFM GGUF 模型进行证据裁判，无需任何额外下载；若下载加速模型，将获得极速专用推理体验。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="group">
+            <div class="group-title">Markdown 文档查看与系统右键菜单</div>
+            <div class="card">
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">Windows 资源管理器右键菜单</div>
+                  <div class="row-desc">在任意 .md、.markdown、.txt 文件右键菜单中显示「📝 使用 miniBot 编辑 Markdown」，支持作为独立轻量编辑器随时秒开查看与修改。</div>
+                </div>
+                <label class="switch">
+                  <input
+                    type="checkbox"
+                    checked={mdContextMenuRegistered}
+                    onchange={handleToggleMdContextMenu}
+                  />
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">独立启动 Markdown 编辑器</div>
+                  <div class="row-desc">内置高性能 CodeMirror 6 编辑内核，支持分屏实时渲染与知识库增量热重排。</div>
+                </div>
+                <button
+                  type="button"
+                  class="btn"
+                  onclick={() => ipc.docOpenEditor()}
+                  title="打开独立的 Markdown 编辑器窗口"
+                >
+                  📝 打开编辑器空白文档
+                </button>
+              </div>
+            </div>
+          </section>
 
         {:else if tab === '外观与常规'}
           <section class="group">
@@ -3892,6 +4232,192 @@
   }
   .port-status-pill.warn {
     background: rgba(239, 68, 68, 0.12);
+    color: var(--danger);
+  }
+
+  /* 知识库专属样式 */
+  .row-item-vertical {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 6px 0;
+  }
+  .path-input-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .path-input {
+    flex: 1;
+    min-width: 260px;
+    font-size: 12.5px;
+    font-family: Consolas, monospace;
+  }
+  .btn-action {
+    white-space: nowrap;
+    font-size: 12px;
+    padding: 6px 12px;
+  }
+  .kb-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+  }
+  .stat-box {
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .highlight-box {
+    border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border));
+    background: color-mix(in srgb, var(--accent-blue) 6%, var(--bg-solid));
+  }
+  .stat-num {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--fg);
+    font-family: Consolas, monospace;
+  }
+  .highlight-num {
+    color: var(--accent-blue);
+  }
+  .stat-lbl {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    margin-top: 3px;
+  }
+  .sub-tip-box {
+    padding: 10px 14px;
+    margin-top: 10px;
+    background: color-mix(in srgb, var(--accent-blue) 8%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 30%, var(--border));
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--fg);
+    line-height: 1.5;
+  }
+
+  /* Laya 加速模型卡片专属样式 */
+  .laya-header {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .laya-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .status-badge {
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-weight: 550;
+  }
+  .status-badge.ok {
+    background: color-mix(in srgb, var(--ok) 14%, var(--panel));
+    color: var(--ok);
+    border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--border));
+  }
+  .status-badge.dim {
+    background: var(--bg-solid);
+    color: var(--fg-dim);
+    border: 1px solid var(--border);
+  }
+  .laya-highlight-tip {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--fg);
+    padding: 9px 12px;
+    background: color-mix(in srgb, var(--accent-blue) 10%, var(--panel));
+    border-left: 3px solid var(--accent-blue);
+    border-radius: 4px;
+  }
+  .laya-action-row {
+    margin: 8px 0;
+  }
+  .laya-download-trigger {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .laya-dl-subhint {
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .laya-dl-btn {
+    padding: 7px 18px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .laya-installed-box {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .act-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .danger-btn {
+    font-size: 12px;
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+  }
+  .danger-btn:hover {
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+  .laya-dl-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    background: var(--bg-solid);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .laya-dl-header, .laya-dl-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .dl-num {
+    font-family: Consolas, monospace;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent-blue);
+    transition: width 0.2s ease;
+  }
+  .dl-err {
+    font-size: 12px;
     color: var(--danger);
   }
 </style>

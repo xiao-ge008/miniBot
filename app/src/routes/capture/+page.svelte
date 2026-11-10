@@ -110,7 +110,7 @@
 
   // ---------- 坐标 ----------
   const k = () => window.innerWidth / Math.max(W, 1); // CSS px / 物理 px
-  const toPhys = (e: MouseEvent) => ({ x: Math.round(e.clientX / k()), y: Math.round(e.clientY / k()) });
+  const toPhys = (e: MouseEvent | PointerEvent) => ({ x: Math.round(e.clientX / k()), y: Math.round(e.clientY / k()) });
   const norm = (x1: number, y1: number, x2: number, y2: number): Rect => ({
     x: Math.min(x1, x2),
     y: Math.min(y1, y2),
@@ -347,10 +347,15 @@
     });
   }
 
-  // ---------- 鼠标 ----------
-  function onDown(e: MouseEvent) {
+  // ---------- 鼠标与指针拖拽 ----------
+  function onPointerDown(e: PointerEvent) {
     if (toolMenuOpen) toolMenuOpen = false;
     if (e.button === 2) return;
+    if (overlay && e.pointerId !== undefined) {
+      try {
+        overlay.setPointerCapture(e.pointerId);
+      } catch {}
+    }
     const p = toPhys(e);
     if (textEdit) {
       const hadText = textEdit.value.trim().length > 0;
@@ -418,11 +423,14 @@
     } else drawing = { t: tool!, x1: x, y1: y, x2: x, y2: y, color: c, w: lineW() } as Shape;
   }
 
-  function onMove(e: MouseEvent) {
+  function onPointerMove(e: PointerEvent) {
     const p = toPhys(e);
     mouse = p;
     if (phase === 'idle') {
       hoverWin = windows.find((r) => inRect(r, p.x, p.y)) ?? null;
+      updateCursor(p);
+    } else if (phase === 'selected') {
+      updateCursor(p);
     } else if (phase === 'selecting') {
       sel = norm(down.x, down.y, p.x, p.y);
     } else if (phase === 'moving' && start && sel) {
@@ -448,11 +456,15 @@
         drawing.y2 = p.y;
       }
     }
-    updateCursor(p);
     render();
   }
 
-  function onUp(e: MouseEvent) {
+  function onPointerUp(e: PointerEvent) {
+    if (overlay && e.pointerId !== undefined) {
+      try {
+        overlay.releasePointerCapture(e.pointerId);
+      } catch {}
+    }
     const p = toPhys(e);
     if (phase === 'selecting') {
       const moved = Math.abs(p.x - down.x) > 4 || Math.abs(p.y - down.y) > 4;
@@ -469,6 +481,24 @@
       phase = 'selected';
       const tiny = 'x2' in d && Math.abs(d.x2 - d.x1) < 3 && Math.abs(d.y2 - d.y1) < 3;
       if (!tiny) pushShape(d);
+    }
+    updateCursor(p);
+    render();
+  }
+
+  function onPointerCancel(e: PointerEvent) {
+    if (overlay && e.pointerId !== undefined) {
+      try {
+        overlay.releasePointerCapture(e.pointerId);
+      } catch {}
+    }
+    if (phase === 'selecting') {
+      phase = sel ? 'selected' : 'idle';
+    } else if (phase === 'moving' || phase === 'resizing') {
+      phase = 'selected';
+    } else if (phase === 'drawing') {
+      drawing = null;
+      phase = 'selected';
     }
     render();
   }
@@ -642,12 +672,24 @@
         await ipc.sendToChat(data, false);
         break;
       case 'copy':
-        close();
         await ipc.copyImage(data);
+        close();
         break;
       case 'save': {
         const saved = await ipc.saveImage(data);
         if (saved) close();
+        break;
+      }
+      case 'save_kb': {
+        toast = '🧠 正在进行视觉整理并存入知识库…';
+        try {
+          await ipc.saveImageToKnowledgeWithVision(data, 'capture');
+          toast = '✓ 原图与视觉解析已存入知识库！';
+          setTimeout(() => close(), 600);
+        } catch (e) {
+          toast = `存库失败: ${e}`;
+          setTimeout(() => (toast = ''), 3000);
+        }
         break;
       }
       case 'pin': {
@@ -777,6 +819,8 @@
     else if (mod && key === 'z' && !e.shiftKey) undo();
     else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) redo();
     else if (mod && key === 'c' && sel) act('copy');
+    else if ((key === 'k' || (mod && key === 'k')) && sel) act('save_kb');
+    else if (mod && key === 's' && sel) act('save');
     else if (e.key === 'Enter' && (mode === 'record' || recMode)) startRecord();
     else if (e.key === 'Enter' && sel) act(mode === 'chat' ? 'attach_chat' : 'copy');
     else if (key === 'c' && !mod) copyColor(e.shiftKey);
@@ -911,9 +955,18 @@
         unReset = fn;
       });
     });
+    const onWindowBlur = () => {
+      if (phase === 'selecting' || phase === 'moving' || phase === 'resizing' || phase === 'drawing') {
+        phase = sel ? 'selected' : 'idle';
+        drawing = null;
+        render();
+      }
+    };
+    window.addEventListener('blur', onWindowBlur);
     return () => {
       un.then((f) => f());
       if (unReset) unReset();
+      window.removeEventListener('blur', onWindowBlur);
     };
   });
 
@@ -1005,9 +1058,10 @@
   <canvas
     class="layer"
     bind:this={overlay}
-    onmousedown={onDown}
-    onmousemove={onMove}
-    onmouseup={onUp}
+    onpointerdown={onPointerDown}
+    onpointermove={onPointerMove}
+    onpointerup={onPointerUp}
+    onpointercancel={onPointerCancel}
     ondblclick={() => sel && !tool && act(mode === 'chat' ? 'attach_chat' : 'copy')}
     oncontextmenu={onContext}
   ></canvas>
@@ -1186,6 +1240,7 @@
           <button class="tb label-tb ok-text" title="将截图放入聊天输入框（补充问题后点发送，Enter / 双击）" onclick={() => act('attach_chat')}>放入输入</button>
           <button class="tb label-tb" title="以图搜图（图片瀑布流 / 找原图 / 动漫角色 / 番剧出处）" onclick={() => act('image_search')}>搜图</button>
           <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
+          <button class="tb label-tb" title="存入知识库：自动提取 OCR 并进行视觉整理生成伴生文档 (快捷键 K)" onclick={() => act('save_kb')}>存知识库(K)</button>
           <button class="tb label-tb" title="通过 LocalSend 发送截图到局域网在线设备" onclick={() => act('localsend')}>发送</button>
           <span class="sep"></span>
           <button class="tb icon-tb cancel-btn" title="取消并返回聊天 Esc" aria-label="取消" onclick={close}>
@@ -1200,6 +1255,7 @@
           <button class="tb label-tb" title="提取文字 (OCR)" onclick={() => act('ocr')}>文字</button>
           <button class="tb label-tb" title="截图翻译" onclick={() => act('translate')}>翻译</button>
           <button class="tb label-tb" title="打开临时问答会话（先列出提问选项或输入问题后回答）" onclick={() => act('qa')}>提问</button>
+          <button class="tb label-tb" title="存入知识库：自动提取 OCR 并进行视觉整理生成伴生文档 (快捷键 K)" onclick={() => act('save_kb')}>存知识库(K)</button>
           {#if qrCount > 0}
             <button class="tb label-tb hot" title={`已识别 ${qrCount} 个二维码`} onclick={() => act('qr')}>二维码</button>
           {/if}
@@ -1403,12 +1459,18 @@
     inset: 0;
     overflow: hidden;
     background: #000;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
   }
   .layer {
     position: absolute;
     inset: 0;
     width: 100vw;
     height: 100vh;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .wh-pill {
     position: absolute;

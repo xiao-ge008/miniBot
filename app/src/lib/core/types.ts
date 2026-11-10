@@ -173,6 +173,71 @@ export interface Settings {
   tip: { enabled: boolean; hide_ms: number; min_chars: number; max_chars: number; blacklist: string[] };
   tts: { voice: string; rate: string; volume: string; auto_lang: boolean };
   api: { enabled: boolean; port: number; lan: boolean; api_key: string; busy_policy: string; thinking: boolean };
+  knowledge: KnowledgeSettings;
+}
+
+export interface KnowledgeSettings {
+  base_path: string;
+  laya_enabled: boolean;
+  auto_search: boolean;
+  candidate_count: number;
+  top_k: number;
+}
+
+export interface LayaStatus {
+  installed: boolean;
+  size_mb: number;
+  path: string;
+  enabled: boolean;
+}
+
+export interface KbStats {
+  base_path: string;
+  notes_count: number;
+  images_count: number;
+  web_count: number;
+  chunks_count: number;
+  total_size_bytes: number;
+}
+
+export interface KbSyncSummary {
+  folder_path: string;
+  scanned_docs: number;
+  total_chunks: number;
+}
+
+export interface KbSearchHit {
+  path: string;
+  relative_path: string;
+  title: string;
+  heading: string;
+  content: string;
+  line_start: number;
+  line_end: number;
+  score: number;
+  origin_image?: string | null;
+}
+
+export interface KbSearchResponse {
+  query: string;
+  hits: KbSearchHit[];
+  context_text: string;
+}
+
+export interface DocFileInfo {
+  path: string;
+  name: string;
+  content: string;
+  size: number;
+  modified_ms: number;
+  is_kb_file: boolean;
+}
+
+export interface DocWriteResult {
+  path: string;
+  size: number;
+  modified_ms: number;
+  kb_reindexed: boolean;
 }
 
 export interface VoiceOption {
@@ -225,6 +290,7 @@ export interface ChatMessageRecord {
   content: string;
   attachments: ChatAttachment[];
   stats?: ChatStats | null;
+  kb_hits?: KbSearchHit[] | null;
   ts?: number;
 }
 

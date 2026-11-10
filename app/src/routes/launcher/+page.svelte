@@ -32,6 +32,7 @@
     ChatSession,
     ChatStats,
     GpuSnapshot,
+    KbSearchHit,
     LlmError,
     SearchHit,
     StatusInfo,
@@ -56,6 +57,9 @@
   let enableWebSearch = $state(false);
   let searchingWeb = $state(false);
   let lastSearchHits = $state<SearchHit[]>([]);
+  let enableKnowledgeSearch = $state(false);
+  let searchingKnowledge = $state(false);
+  let lastKnowledgeHits = $state<KbSearchHit[]>([]);
 
   function setReasoningEffort(level: ReasoningEffort) {
     reasoningEffort = level;
@@ -74,6 +78,17 @@
   let errorMsg = $state('');
   let gpu = $state<{ snapshot: GpuSnapshot; required: number } | null>(null);
   let reqId = '';
+
+  let kbActionTip = $state('');
+  let kbActionTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function flashMsg(msg: string, ms = 3000) {
+    kbActionTip = msg;
+    clearTimeout(kbActionTimer);
+    kbActionTimer = setTimeout(() => {
+      kbActionTip = '';
+    }, ms);
+  }
 
   // UI 交互状态
   let status = $state<StatusInfo | null>(null);
@@ -486,8 +501,28 @@
 
   // ---------- 发送与流式多轮对话（完全对齐 llama.cpp 内置 WebUI） ----------
 
-  function buildOpenAiMessages(historyRecords: ChatMessageRecord[], webSearchCtx = ''): ChatMessage[] {
+  function buildOpenAiMessages(
+    historyRecords: ChatMessageRecord[],
+    searchCtx = '',
+    isKbEnabled = false,
+  ): ChatMessage[] {
     const out: ChatMessage[] = [];
+
+    // 当用户点亮【🧠 知识库】时，在消息最顶端注入专属系统指令，引导 AI 建立「先查阅知识库」的思考思维
+    if (isKbEnabled) {
+      out.push({
+        role: 'system',
+        content: `【miniBot 专属知识库智能体模式已激活】
+当前用户已主动开启【🧠 个人知识库】。你正在作为用户的专属私人知识库助手进行深度对话。
+用户的知识库包含用户私人的工作笔记、角色扮演世界观设定、NPC人物档案、小说剧本与专属资料。
+
+【核心思维链与回答天条（必须严格遵守）】：
+1. 【知识库优先思维】：用户提问中涉及的所有人名（如“小雪”、“小雨”）、角色、称呼（如“主人”、“大管家”）、地点或设定，均为你所接入的个人私有知识库中的专属私密设定！严禁将其当作现实世界的公众人物、明星或常识去脑补！
+2. 【先查阅证据再作答】：用户提问后，必须首先在深度思考中查阅与调阅系统检索出来的知识库资料。若资料中已有明确记载，直接以确凿、肯定的口吻进行回答；
+3. 【引用标注】：引述任何事实、设定或细节时，必须在句末标注对应的引用角标（如 [1]、[2]）；
+4. 【未直接记录时的引导】：若检索资料中未包含用户所问的特定细节，请在思考中明确，并客观说明“在当前知识库现有资料中暂未找到关于XX的直接记载”，可结合已有角色关系给出分析，切勿混淆为现实明星或无关百科！`,
+      });
+    }
 
     // 只保留最近 2 轮带图消息的原始 base64 图像，防止超长多轮对话撑满视觉上下文
     const mediaMsgIndices = historyRecords
@@ -497,7 +532,7 @@
     const lastIdx = historyRecords.length - 1;
 
     historyRecords.forEach((m, idx) => {
-      const extraSearch = idx === lastIdx && m.role === 'user' ? webSearchCtx : '';
+      const extraSearch = idx === lastIdx && m.role === 'user' ? searchCtx : '';
       if (m.role === 'user' && m.attachments?.length && recentMediaSet.has(idx)) {
         const parts: ({ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } })[] = [];
         const videoNotes: string[] = [];
@@ -622,10 +657,24 @@
 
     // 仅当用户手动开启「🌐 联网」开关时才执行联网检索（默认关闭，不自动触发）
     let webSearchCtx = '';
+    let kbSearchCtx = '';
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     const userQuery = lastUser?.content?.trim() ?? '';
     const isDefaultMediaPrompt =
       userQuery === '请识别并分析这张图片的内容' || userQuery === '请识别并分析这个视频的内容';
+
+    if (enableKnowledgeSearch && userQuery && !isDefaultMediaPrompt) {
+      searchingKnowledge = true;
+      try {
+        const kbres = await ipc.kbSearch(userQuery, 15);
+        lastKnowledgeHits = kbres.hits ?? [];
+        kbSearchCtx = kbres.context_text ?? '';
+      } catch (e) {
+        console.error('知识库检索异常:', e);
+      } finally {
+        searchingKnowledge = false;
+      }
+    }
 
     if (enableWebSearch && userQuery && !isDefaultMediaPrompt) {
       searchingWeb = true;
@@ -643,7 +692,11 @@
       }
     }
 
-    const openAiMsgs = buildOpenAiMessages(messages, webSearchCtx);
+    const openAiMsgs = buildOpenAiMessages(
+      messages,
+      `${kbSearchCtx}${webSearchCtx}`,
+      enableKnowledgeSearch,
+    );
     let latestStats: ChatStats | null = null;
 
     try {
@@ -685,7 +738,15 @@
       streamingOutput = '';
       streamingStats = null;
       if (finalOut) {
-        const aid = await ipc.chatMessageAdd(currentSessionId, 'assistant', finalOut, [], finalStats);
+        const hitsToSave = lastKnowledgeHits.length > 0 ? [...lastKnowledgeHits] : null;
+        const aid = await ipc.chatMessageAdd(
+          currentSessionId,
+          'assistant',
+          finalOut,
+          [],
+          finalStats,
+          hitsToSave,
+        );
         messages = [
           ...messages,
           {
@@ -695,6 +756,7 @@
             content: finalOut,
             attachments: [],
             stats: finalStats,
+            kb_hits: hitsToSave,
             ts: Math.floor(Date.now() / 1000),
           },
         ];
@@ -746,6 +808,99 @@
 
   function stopStream() {
     if (reqId) ipc.llmCancel(reqId);
+  }
+
+  function handleContentClick(e: MouseEvent, hits?: KbSearchHit[] | null) {
+    const target = (e.target as HTMLElement)?.closest('.kb-cite-link');
+    if (target && hits && hits.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      const citeIdx = Number(target.getAttribute('data-cite-idx'));
+      const hit = hits[citeIdx - 1];
+      if (hit) {
+        ipc.docOpenEditor(hit.path, hit.heading || hit.title);
+        flashMsg(`📝 正在内置编辑器打开原文：《${hit.title}》`, 3500);
+      }
+    }
+  }
+
+  function getCitedHits(content: string, hits?: KbSearchHit[] | null): { n: number; hit: KbSearchHit }[] {
+    if (!hits || hits.length === 0 || !content) return [];
+    const citedSet = new Set<number>();
+    const matches = content.matchAll(/\[(\d+)\]/g);
+    for (const m of matches) {
+      const n = parseInt(m[1], 10);
+      if (n >= 1 && n <= hits.length) {
+        citedSet.add(n);
+      }
+    }
+    const out: { n: number; hit: KbSearchHit }[] = [];
+    for (const n of Array.from(citedSet).sort((a, b) => a - b)) {
+      out.push({ n, hit: hits[n - 1] });
+    }
+    return out;
+  }
+
+  // 知识库出处关联图片 Base64 缓存与全屏灯箱预览
+  let kbImgCache = $state<Record<string, string>>({});
+  let lightboxImg = $state<{ src: string; title: string; path: string } | null>(null);
+
+  function loadKbImage(imgPhysPath: string) {
+    if (!imgPhysPath || kbImgCache[imgPhysPath]) return;
+    ipc
+      .kbReadImageBase64(imgPhysPath)
+      .then((dataUri) => {
+        kbImgCache = { ...kbImgCache, [imgPhysPath]: dataUri };
+      })
+      .catch(() => {});
+  }
+
+  function preloadHitsImages(hits?: KbSearchHit[] | null) {
+    if (!hits) return;
+    for (const h of hits) {
+      if (h.origin_image && !kbImgCache[h.origin_image]) {
+        loadKbImage(h.origin_image);
+      }
+    }
+  }
+
+  $effect(() => {
+    if (lastKnowledgeHits?.length) {
+      preloadHitsImages(lastKnowledgeHits);
+    }
+  });
+
+  $effect(() => {
+    if (messages?.length) {
+      for (const m of messages) {
+        if (m.kb_hits?.length) {
+          preloadHitsImages(m.kb_hits);
+        }
+      }
+    }
+  });
+
+  function getCitedImageHits(content: string, hits?: KbSearchHit[] | null): { n: number; hit: KbSearchHit }[] {
+    const cited = getCitedHits(content, hits);
+    let list: { n: number; hit: KbSearchHit }[] = [];
+    if (cited.some((c) => c.hit.origin_image)) {
+      list = cited.filter((c) => !!c.hit.origin_image);
+    } else if (hits) {
+      list = hits
+        .slice(0, 8)
+        .map((h, i) => ({ n: i + 1, hit: h }))
+        .filter((c) => !!c.hit.origin_image);
+    }
+    // 按 origin_image 路径去重，避免相同图片的多个切片在画廊重复出现
+    const seen = new Set<string>();
+    const unique: { n: number; hit: KbSearchHit }[] = [];
+    for (const item of list) {
+      if (item.hit.origin_image && !seen.has(item.hit.origin_image)) {
+        seen.add(item.hit.origin_image);
+        unique.push(item);
+      }
+    }
+    return unique;
   }
 
   async function copyReply(id: string | number, raw: string) {
@@ -805,6 +960,9 @@
     syncModelReasoningEffort();
     loadSessions(true);
     checkUpdateSilent(true);
+    ipc.getSettings().then((s) => {
+      enableKnowledgeSearch = s.knowledge?.auto_search ?? false;
+    }).catch(() => {});
     const unP = onPayload(() => {
       openedAt = Date.now();
       win.setAlwaysOnTop(pinned).catch(() => {});
@@ -1033,6 +1191,12 @@
       </div>
     {/if}
 
+    {#if kbActionTip}
+      <div class="kb-toast">
+        {kbActionTip}
+      </div>
+    {/if}
+
     <div class="chat-body" bind:this={scroller}>
       {#if messages.length === 0 && !busy && !errorMsg && !gpu}
         <div class="empty-state">
@@ -1099,7 +1263,156 @@
                   {/if}
                 </div>
               {/if}
-              <div class="md selectable">{@html renderMarkdown(parsed.answer)}</div>
+              <div
+                class="md selectable"
+                onclick={(e) => handleContentClick(e, msg.kb_hits)}
+              >
+                {@html renderMarkdown(parsed.answer, msg.kb_hits)}
+              </div>
+
+              {#if getCitedImageHits(parsed.answer, msg.kb_hits).length > 0}
+                <div class="kb-gallery-box">
+                  <div class="kb-gallery-head">
+                    <span>🖼️ 命中关联知识库图片 ({getCitedImageHits(parsed.answer, msg.kb_hits).length})</span>
+                    <span class="gallery-hint">点击可全屏查看原图</span>
+                  </div>
+                  <div class="kb-gallery-grid">
+                    {#each getCitedImageHits(parsed.answer, msg.kb_hits) as { n, hit }}
+                      {#if hit.origin_image}
+                        <div
+                          class="kb-img-card"
+                          role="button"
+                          tabindex="0"
+                          onclick={() => {
+                            if (kbImgCache[hit.origin_image!]) {
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }
+                          }}
+                          onkeydown={(e) => {
+                            if (e.key === 'Enter' && kbImgCache[hit.origin_image!]) {
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }
+                          }}
+                        >
+                          <div class="kb-img-thumb-wrap">
+                            {#if kbImgCache[hit.origin_image]}
+                              <img
+                                src={kbImgCache[hit.origin_image]}
+                                alt={hit.title}
+                                class="kb-img-thumb"
+                                loading="lazy"
+                              />
+                            {:else}
+                              <div class="kb-img-loading">
+                                <span class="spinner small"></span>
+                                <span>载入图片…</span>
+                              </div>
+                            {/if}
+                            <span class="kb-img-badge">[{n}]</span>
+                          </div>
+                          <div class="kb-img-meta">
+                            <span class="kb-img-title" title="{hit.title}">{hit.title}</span>
+                            <div class="kb-img-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                              <button
+                                type="button"
+                                class="src-act-btn"
+                                title="在内置编辑器查看笔记"
+                                onclick={() => {
+                                  ipc.docOpenEditor(hit.path, hit.heading || hit.title);
+                                  flashMsg(`📝 正在内置编辑器打开：《${hit.title}》`);
+                                }}
+                              >
+                                📝 查看
+                              </button>
+                              <button
+                                type="button"
+                                class="src-act-btn"
+                                title="在资源管理器中定位原图"
+                                onclick={() => {
+                                  ipc.kbRevealFile(hit.origin_image!);
+                                  flashMsg(`📂 已定位原图：《${hit.title}》`);
+                                }}
+                              >
+                                📂 原图
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      {/if}
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+
+              {#if getCitedHits(parsed.answer, msg.kb_hits).length > 0}
+                <div class="kb-sources-box">
+                  <div class="kb-sources-head">
+                    <span>📚 知识库参考出处 ({getCitedHits(parsed.answer, msg.kb_hits).length})</span>
+                  </div>
+                  <div class="kb-sources-pills">
+                    {#each getCitedHits(parsed.answer, msg.kb_hits) as { n, hit }}
+                      <div class="kb-source-card" title="{hit.content.slice(0, 160)}…">
+                        <span class="source-tag">[{n}]</span>
+                        {#if hit.origin_image && kbImgCache[hit.origin_image]}
+                          <button
+                            type="button"
+                            class="source-mini-thumb-btn"
+                            title="点击放大查看图片"
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }}
+                          >
+                            <img
+                              src={kbImgCache[hit.origin_image]}
+                              alt=""
+                              class="source-mini-thumb"
+                            />
+                          </button>
+                        {/if}
+                        <span class="source-title" title="{hit.relative_path}">{hit.title}</span>
+                        <span class="source-lines">L{hit.line_start}-{hit.line_end}</span>
+                        <div class="source-btns">
+                          <button
+                            type="button"
+                            class="src-act-btn"
+                            onclick={() => {
+                              ipc.docOpenEditor(hit.path, hit.heading || hit.title);
+                              flashMsg(`📝 正在内置编辑器打开：《${hit.title}》`);
+                            }}
+                            title="在内置高性能 Markdown 编辑器中打开并编辑"
+                          >
+                            📝 查看/编辑
+                          </button>
+                          <button
+                            type="button"
+                            class="src-act-btn"
+                            onclick={() => {
+                              ipc.kbRevealFile(hit.path);
+                              flashMsg(`📂 已在文件管理器中定位：《${hit.title}》`);
+                            }}
+                            title="在资源管理器中定位并选中该文件"
+                          >
+                            📂 定位
+                          </button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               <div class="ai-toolbar" class:visible={tts.activeId === `msg-${key}`}>
                 <SpeakButton
                   id={`msg-${key}`}
@@ -1177,7 +1490,156 @@
             {/if}
 
             {#if streamParsed.answer}
-              <div class="md selectable">{@html renderMarkdown(streamParsed.answer)}</div>
+              <div
+                class="md selectable"
+                onclick={(e) => handleContentClick(e, lastKnowledgeHits)}
+              >
+                {@html renderMarkdown(streamParsed.answer, lastKnowledgeHits)}
+              </div>
+
+              {#if getCitedImageHits(streamParsed.answer, lastKnowledgeHits).length > 0}
+                <div class="kb-gallery-box">
+                  <div class="kb-gallery-head">
+                    <span>🖼️ 命中关联知识库图片 ({getCitedImageHits(streamParsed.answer, lastKnowledgeHits).length})</span>
+                    <span class="gallery-hint">点击可全屏查看原图</span>
+                  </div>
+                  <div class="kb-gallery-grid">
+                    {#each getCitedImageHits(streamParsed.answer, lastKnowledgeHits) as { n, hit }}
+                      {#if hit.origin_image}
+                        <div
+                          class="kb-img-card"
+                          role="button"
+                          tabindex="0"
+                          onclick={() => {
+                            if (kbImgCache[hit.origin_image!]) {
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }
+                          }}
+                          onkeydown={(e) => {
+                            if (e.key === 'Enter' && kbImgCache[hit.origin_image!]) {
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }
+                          }}
+                        >
+                          <div class="kb-img-thumb-wrap">
+                            {#if kbImgCache[hit.origin_image]}
+                              <img
+                                src={kbImgCache[hit.origin_image]}
+                                alt={hit.title}
+                                class="kb-img-thumb"
+                                loading="lazy"
+                              />
+                            {:else}
+                              <div class="kb-img-loading">
+                                <span class="spinner small"></span>
+                                <span>载入图片…</span>
+                              </div>
+                            {/if}
+                            <span class="kb-img-badge">[{n}]</span>
+                          </div>
+                          <div class="kb-img-meta">
+                            <span class="kb-img-title" title="{hit.title}">{hit.title}</span>
+                            <div class="kb-img-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                              <button
+                                type="button"
+                                class="src-act-btn"
+                                title="在内置编辑器查看笔记"
+                                onclick={() => {
+                                  ipc.docOpenEditor(hit.path, hit.heading || hit.title);
+                                  flashMsg(`📝 正在内置编辑器打开：《${hit.title}》`);
+                                }}
+                              >
+                                📝 查看
+                              </button>
+                              <button
+                                type="button"
+                                class="src-act-btn"
+                                title="在资源管理器中定位原图"
+                                onclick={() => {
+                                  ipc.kbRevealFile(hit.origin_image!);
+                                  flashMsg(`📂 已定位原图：《${hit.title}》`);
+                                }}
+                              >
+                                📂 原图
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      {/if}
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+
+              {#if getCitedHits(streamParsed.answer, lastKnowledgeHits).length > 0}
+                <div class="kb-sources-box">
+                  <div class="kb-sources-head">
+                    <span>📚 知识库参考出处 ({getCitedHits(streamParsed.answer, lastKnowledgeHits).length})</span>
+                  </div>
+                  <div class="kb-sources-pills">
+                    {#each getCitedHits(streamParsed.answer, lastKnowledgeHits) as { n, hit }}
+                      <div class="kb-source-card" title="{hit.content.slice(0, 160)}…">
+                        <span class="source-tag">[{n}]</span>
+                        {#if hit.origin_image && kbImgCache[hit.origin_image]}
+                          <button
+                            type="button"
+                            class="source-mini-thumb-btn"
+                            title="点击放大查看图片"
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              lightboxImg = {
+                                src: kbImgCache[hit.origin_image!],
+                                title: hit.title,
+                                path: hit.origin_image!,
+                              };
+                            }}
+                          >
+                            <img
+                              src={kbImgCache[hit.origin_image]}
+                              alt=""
+                              class="source-mini-thumb"
+                            />
+                          </button>
+                        {/if}
+                        <span class="source-title" title="{hit.relative_path}">{hit.title}</span>
+                        <span class="source-lines">L{hit.line_start}-{hit.line_end}</span>
+                        <div class="source-btns">
+                          <button
+                            type="button"
+                            class="src-act-btn"
+                            onclick={() => {
+                              ipc.docOpenEditor(hit.path, hit.heading || hit.title);
+                              flashMsg(`📝 正在内置编辑器打开：《${hit.title}》`);
+                            }}
+                            title="在内置高性能 Markdown 编辑器中打开并编辑"
+                          >
+                            📝 查看/编辑
+                          </button>
+                          <button
+                            type="button"
+                            class="src-act-btn"
+                            onclick={() => {
+                              ipc.kbRevealFile(hit.path);
+                              flashMsg(`📂 已在文件管理器中定位：《${hit.title}》`);
+                            }}
+                            title="在资源管理器中定位并选中该文件"
+                          >
+                            📂 定位
+                          </button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
             {:else if stage === 'streaming' && !streamParsed.thinking}
               <div class="state-line">
                 <span class="pulse-dot"></span>
@@ -1269,6 +1731,7 @@
             } else if (e.key === 'Escape') {
               e.preventDefault();
               if (previewAttachment) previewAttachment = null;
+              else if (lightboxImg) lightboxImg = null;
               else closeWindow();
             }
           }}
@@ -1352,6 +1815,15 @@
             <span>🌐 联网</span>
           </button>
 
+          <button
+            class="c-tool"
+            class:active={enableKnowledgeSearch}
+            onclick={() => (enableKnowledgeSearch = !enableKnowledgeSearch)}
+            title={enableKnowledgeSearch ? '已开启本地知识库检索（点击关闭）' : '默认关闭知识库检索，点击开启（将从本地笔记与图片中检索事实）'}
+          >
+            <span>🧠 知识库</span>
+          </button>
+
           <span class="spacer"></span>
 
           {#if busy}
@@ -1383,6 +1855,34 @@
           <button class="win-btn close" onclick={() => (previewAttachment = null)}>✕</button>
         </div>
         <img src={previewAttachment.data_url} alt={previewAttachment.name} />
+      </div>
+    </div>
+  {/if}
+
+  <!-- 知识库关联图片高清全屏预览灯箱 -->
+  {#if lightboxImg}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="lightbox" onclick={() => (lightboxImg = null)} role="button" tabindex="0">
+      <div class="lightbox-inner" onclick={(e) => e.stopPropagation()} role="presentation">
+        <div class="lightbox-head">
+          <b>🖼️ {lightboxImg.title}</b>
+          <span class="lightbox-info" title={lightboxImg.path}>{lightboxImg.path}</span>
+          <span class="spacer"></span>
+          <button
+            type="button"
+            class="src-act-btn"
+            style="padding: 3px 10px; font-size: 11px;"
+            onclick={() => {
+              ipc.kbRevealFile(lightboxImg!.path);
+              flashMsg('📂 已在资源管理器中定位原图');
+            }}
+            title="在文件夹中定位此图片"
+          >
+            📂 定位原图
+          </button>
+          <button class="win-btn close" onclick={() => (lightboxImg = null)}>✕</button>
+        </div>
+        <img src={lightboxImg.src} alt={lightboxImg.title} />
       </div>
     </div>
   {/if}
@@ -2247,5 +2747,265 @@
     border: none;
     background: transparent;
     color: var(--fg-dim);
+  }
+
+  /* 知识库引用角标与来源卡片 */
+  :global(.kb-cite-link) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 600;
+    color: var(--accent-blue);
+    background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 35%, transparent);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin: 0 2px;
+    cursor: pointer;
+    text-decoration: none;
+    vertical-align: 1px;
+    transition: all 0.15s ease;
+  }
+  :global(.kb-cite-link:hover) {
+    background: var(--accent-blue);
+    color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+  }
+
+  .kb-sources-box {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--accent-blue) 4%, var(--bg-solid));
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 18%, var(--border));
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .kb-sources-head {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .kb-sources-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .kb-source-card {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    transition: border-color 0.15s ease;
+  }
+  .kb-source-card:hover {
+    border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--border));
+  }
+  .source-tag {
+    font-weight: 700;
+    color: var(--accent-blue);
+    font-size: 10.5px;
+  }
+  .source-title {
+    max-width: 140px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .source-lines {
+    color: var(--fg-dim);
+    font-size: 10px;
+    font-family: Consolas, monospace;
+  }
+  .source-btns {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 2px;
+  }
+  .src-act-btn {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-solid);
+    color: var(--fg);
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .src-act-btn:hover {
+    background: var(--accent-blue);
+    color: #fff;
+    border-color: var(--accent-blue);
+  }
+
+  .source-mini-thumb-btn {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    cursor: zoom-in;
+    display: inline-flex;
+    align-items: center;
+  }
+  .source-mini-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    cursor: zoom-in;
+    transition: transform 0.12s ease;
+  }
+  .source-mini-thumb:hover {
+    transform: scale(1.2);
+  }
+
+  .kb-gallery-box {
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--accent-blue) 6%, var(--bg-solid));
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 25%, var(--border));
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .kb-gallery-head {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .gallery-hint {
+    font-size: 10.5px;
+    color: var(--fg-dim);
+    font-weight: 400;
+  }
+  .kb-gallery-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .kb-img-card {
+    display: flex;
+    flex-direction: column;
+    width: 130px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: zoom-in;
+    transition: all 0.16s ease;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  }
+  .kb-img-card:hover {
+    border-color: var(--accent-blue);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  }
+  .kb-img-thumb-wrap {
+    position: relative;
+    width: 100%;
+    height: 90px;
+    background: rgba(0, 0, 0, 0.04);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .kb-img-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: transform 0.2s ease;
+  }
+  .kb-img-card:hover .kb-img-thumb {
+    transform: scale(1.05);
+  }
+  .kb-img-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--fg-dim);
+  }
+  .kb-img-badge {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 4px;
+    backdrop-filter: blur(4px);
+  }
+  .kb-img-meta {
+    padding: 5px 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+  .kb-img-title {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .kb-img-actions {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .kb-toast {
+    position: fixed;
+    top: 50px;
+    right: 20px;
+    background: var(--panel);
+    border: 1px solid var(--accent-blue);
+    color: var(--fg);
+    padding: 7px 15px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+    z-index: 999;
+    animation: kbToastIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes kbToastIn {
+    from {
+      opacity: 0;
+      transform: translateY(-8px) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 </style>

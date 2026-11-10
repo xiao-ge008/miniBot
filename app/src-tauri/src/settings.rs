@@ -333,6 +333,49 @@ impl Default for UiSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct KnowledgeSettings {
+    /// 知识库根目录路径（空则默认使用 %APPDATA%/miniBot/Knowledge）
+    pub base_path: String,
+    /// 是否开启 Laya 极速决策引擎加速（若本地已存在模型）
+    pub laya_enabled: bool,
+    /// 聊天框是否默认开启知识库搜索（默认 false）
+    pub auto_search: bool,
+    /// 检索候选数量（默认 20）
+    pub candidate_count: usize,
+    /// 最终向模型提供的证据片段数量（默认 5）
+    pub top_k: usize,
+}
+
+pub fn default_knowledge_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = dirs::data_dir() {
+            return appdata.join("miniBot").join("Knowledge");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(appdata) = dirs::data_local_dir() {
+            return appdata.join("com.minibot.app").join("Knowledge");
+        }
+    }
+    PathBuf::from("Knowledge")
+}
+
+impl Default for KnowledgeSettings {
+    fn default() -> Self {
+        Self {
+            base_path: default_knowledge_dir().to_string_lossy().into(),
+            laya_enabled: false,
+            auto_search: false,
+            candidate_count: 20,
+            top_k: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub autostart: bool,
     pub target_lang: String,
@@ -345,6 +388,7 @@ pub struct Settings {
     pub tip: TipSettings,
     pub tts: TtsSettings,
     pub api: ApiSettings,
+    pub knowledge: KnowledgeSettings,
 }
 
 impl Default for Settings {
@@ -363,6 +407,7 @@ impl Default for Settings {
             tip: TipSettings::default(),
             tts: TtsSettings::default(),
             api: ApiSettings::default(),
+            knowledge: KnowledgeSettings::default(),
         }
     }
 }

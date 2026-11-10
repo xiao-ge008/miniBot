@@ -140,6 +140,21 @@ export function loadActions(): Promise<void> {
       order: 75,
       run: (p) => ipc.openLocalSend(p),
     });
+    register({
+      id: 'save_to_kb',
+      label: '存入知识库',
+      icon: '📥',
+      accepts: ['text', 'image', 'url', 'file'],
+      surfaces: ['tip', 'capture', 'more', 'launcher'],
+      order: 80,
+      run: async (p) => {
+        try {
+          await ipc.saveToKnowledge(p);
+        } catch (e) {
+          console.error('存入知识库失败:', e);
+        }
+      },
+    });
     // 视频：预留入口，后续版本注册「抽帧描述 / 字幕总结 / 转 GIF」等动作即可
 
     // ---- 用户自定义智能体 ----

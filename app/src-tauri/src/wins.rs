@@ -218,12 +218,10 @@ pub fn get_or_build(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
 /// 启动时预创建常用浮窗（隐藏），按热键或触发动作时只需显示，速度最快且避免运行时建窗死锁
 pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
     for (name, f) in [
-        ("tip", build_tip as fn(&AppHandle) -> tauri::Result<WebviewWindow>),
-        ("recorder", build_recorder),
-        ("recorder_border", build_recorder_border),
-        ("result", build_result),
+        ("launcher", build_launcher as fn(&AppHandle) -> tauri::Result<WebviewWindow>),
         ("capture", build_capture),
-        ("launcher", build_launcher),
+        ("result", build_result),
+        ("tip", build_tip),
     ] {
         match f(app) {
             Ok(_) => crate::log_msg(app, format!("[setup] 预创建 {name} 成功")),
@@ -719,6 +717,49 @@ pub fn close_page(app: &AppHandle, label: &str) {
         }
         if RETURN_TO_CHAT.swap(false, Ordering::SeqCst) {
             open_launcher(&app2);
+        }
+    });
+}
+
+/// 打开独立高性能 Markdown 文档查看与编辑器窗口
+pub fn open_doc_editor(app: &AppHandle, path: Option<String>, query: Option<String>) {
+    let p_clone = path.clone();
+    let q_clone = query.clone();
+    let st = app.state::<crate::AppState>();
+    if let Some(p) = &path {
+        *st.pending_doc.lock().unwrap() = Some((p.clone(), query.clone()));
+    }
+    run_win_task(app, move |app2| {
+        let payload_json = serde_json::json!({
+            "path": p_clone,
+            "query": q_clone,
+        });
+        if let Some(w) = app2.get_webview_window("editor") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+            let _ = app2.emit_to("editor", "minibot://open-doc", payload_json);
+            let h = hwnd_of(&w);
+            crate::winutil::focus_hwnd(h);
+            return;
+        }
+        match builder(&app2, "editor", "editor")
+            .title("miniBot · Markdown 编辑器")
+            .inner_size(1080.0, 760.0)
+            .min_inner_size(680.0, 480.0)
+            .decorations(false)
+            .shadow(true)
+            .center()
+            .build()
+        {
+            Ok(w) => {
+                let _ = w.show();
+                let _ = w.set_focus();
+                let _ = app2.emit_to("editor", "minibot://open-doc", payload_json);
+                let h = hwnd_of(&w);
+                crate::winutil::focus_hwnd(h);
+            }
+            Err(e) => crate::log_msg(&app2, format!("[wins] 打开 Markdown 编辑器失败：{e}")),
         }
     });
 }

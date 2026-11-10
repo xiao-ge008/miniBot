@@ -444,6 +444,16 @@ mod imp {
             );
         }
     }
+
+    #[allow(dead_code)]
+    pub fn check_screen_capture_permission() -> bool {
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn request_screen_capture_permission() -> bool {
+        true
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -715,10 +725,33 @@ mod imp {
     pub fn fast_window_rects(_fx: i32, _fy: i32, _fw: u32, _fh: u32) -> Vec<[i32; 4]> {
         vec![]
     }
+
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    pub fn check_screen_capture_permission() -> bool {
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    pub fn request_screen_capture_permission() -> bool {
+        unsafe { CGRequestScreenCaptureAccess() }
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 mod imp {
+    #[allow(dead_code)]
+    pub fn check_screen_capture_permission() -> bool {
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn request_screen_capture_permission() -> bool {
+        true
+    }
+
     pub fn process_name(_pid: u32) -> Option<String> {
         None
     }

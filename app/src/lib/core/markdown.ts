@@ -1,17 +1,33 @@
-// 极简 Markdown 渲染（零依赖）：标题、粗斜体、行内代码、代码块、列表、引用、表格、链接
+import type { KbSearchHit } from './types';
+
+// 极简 Markdown 渲染（零依赖）：标题、粗斜体、行内代码、代码块、列表、引用、表格、链接、知识库角标
 function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function inline(s: string) {
-  return esc(s)
+function inline(s: string, kbHits?: KbSearchHit[] | null) {
+  let res = esc(s)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+  // 将 [1]、[2] 等引用角标渲染为带交互的高亮可点击链接
+  if (kbHits && kbHits.length > 0) {
+    res = res.replace(/\[(\d+)\]/g, (match, numStr) => {
+      const idx = parseInt(numStr, 10) - 1;
+      const hit = kbHits[idx];
+      if (hit) {
+        const tip = `📄 来源：《${hit.title || '文档'}》- ${hit.relative_path || ''} (第 ${hit.line_start || 1}-${hit.line_end || 1} 行)\n点击直接打开原文`;
+        return `<a href="javascript:void(0)" class="kb-cite-link" data-cite-idx="${numStr}" title="${esc(tip)}">[${numStr}]</a>`;
+      }
+      return match;
+    });
+  }
+  return res;
 }
 
-export function renderMarkdown(src: string): string {
+export function renderMarkdown(src: string, kbHits?: KbSearchHit[] | null): string {
   const lines = src.replace(/\r/g, '').split('\n');
   const out: string[] = [];
   let i = 0;
@@ -28,7 +44,7 @@ export function renderMarkdown(src: string): string {
     }
     // 表格
     if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
-      const row = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
+      const row = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim(), kbHits));
       const head = row(line);
       i += 2;
       const body: string[][] = [];
@@ -42,25 +58,25 @@ export function renderMarkdown(src: string): string {
     }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {
-      out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
+      out.push(`<h${h[1].length}>${inline(h[2], kbHits)}</h${h[1].length}>`);
       i++;
       continue;
     }
     if (/^\s*[-*+]\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) items.push(inline(lines[i++].replace(/^\s*[-*+]\s+/, '')));
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) items.push(inline(lines[i++].replace(/^\s*[-*+]\s+/, ''), kbHits));
       out.push(`<ul>${items.map((x) => `<li>${x}</li>`).join('')}</ul>`);
       continue;
     }
     if (/^\s*\d+[.)]\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items.push(inline(lines[i++].replace(/^\s*\d+[.)]\s+/, '')));
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items.push(inline(lines[i++].replace(/^\s*\d+[.)]\s+/, ''), kbHits));
       out.push(`<ol>${items.map((x) => `<li>${x}</li>`).join('')}</ol>`);
       continue;
     }
     if (line.startsWith('>')) {
       const buf: string[] = [];
-      while (i < lines.length && lines[i].startsWith('>')) buf.push(inline(lines[i++].replace(/^>\s?/, '')));
+      while (i < lines.length && lines[i].startsWith('>')) buf.push(inline(lines[i++].replace(/^>\s?/, ''), kbHits));
       out.push(`<blockquote>${buf.join('<br>')}</blockquote>`);
       continue;
     }
@@ -70,10 +86,10 @@ export function renderMarkdown(src: string): string {
     }
     const para: string[] = [];
     while (i < lines.length && lines[i].trim() !== '' && !/^(```|#{1,6}\s|\s*[-*+]\s|\s*\d+[.)]\s|>)/.test(lines[i])) {
-      para.push(inline(lines[i++]));
+      para.push(inline(lines[i++], kbHits));
     }
     if (para.length === 0) {
-      out.push(`<p>${inline(lines[i++])}</p>`);
+      out.push(`<p>${inline(lines[i++], kbHits)}</p>`);
     } else {
       out.push(`<p>${para.join('<br>')}</p>`);
     }

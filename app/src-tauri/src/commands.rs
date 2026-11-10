@@ -400,7 +400,8 @@ pub async fn copy_image(st: State<'_, AppState>, data: String) -> R<()> {
     let w = img.width() as usize;
     let h = img.height() as usize;
     let raw = img.into_raw();
-    st.clip.suppress(800);
+    st.clip.suppress(1500);
+    st.clip.record_self_image(w, h, raw.len());
     let mut cb = arboard::Clipboard::new().map_err(e)?;
     let mut last_err = None;
     for i in 0..6 {
@@ -587,11 +588,19 @@ pub fn chat_message_add(
     content: String,
     attachments: Vec<crate::history::ChatAttachment>,
     stats: Option<crate::llm::ChatStats>,
+    kb_hits: Option<Vec<crate::kb::KbSearchHit>>,
 ) -> R<i64> {
     st.history
         .as_ref()
         .ok_or("历史库不可用")?
-        .chat_message_add(&session_id, &role, &content, &attachments, stats.as_ref())
+        .chat_message_add(
+            &session_id,
+            &role,
+            &content,
+            &attachments,
+            stats.as_ref(),
+            kb_hits.as_deref(),
+        )
         .map_err(e)
 }
 
@@ -861,5 +870,169 @@ pub fn recorder_reveal(path: String) -> R<()> {
 pub fn recorder_copy_file(app: AppHandle, path: String) -> R<()> {
     crate::recorder::copy_video_file_to_clipboard(&app, &path)
 }
+
+// ---------- 本地知识库 ----------
+
+#[tauri::command]
+pub async fn kb_save_clip(
+    app: AppHandle,
+    text: String,
+    source_app: Option<String>,
+    url: Option<String>,
+) -> R<String> {
+    let p = crate::kb::save_clip(&app, &text, source_app.as_deref(), url.as_deref()).await.map_err(e)?;
+    Ok(p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn kb_save_image(
+    app: AppHandle,
+    img_data: String,
+    ocr_text: Option<String>,
+    vision_desc: Option<String>,
+    source: Option<String>,
+) -> R<String> {
+    let p = crate::kb::save_image(&app, &img_data, ocr_text.as_deref(), vision_desc.as_deref(), source.as_deref()).await.map_err(e)?;
+    Ok(p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn kb_save_web(
+    app: AppHandle,
+    url: String,
+    title: Option<String>,
+    content: String,
+) -> R<String> {
+    let p = crate::kb::save_web(&app, &url, title.as_deref(), &content).await.map_err(e)?;
+    Ok(p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn kb_get_stats(app: AppHandle) -> R<crate::kb::KbStats> {
+    crate::kb::get_kb_stats(&app).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_open_folder(app: AppHandle) -> R<()> {
+    crate::kb::open_kb_folder(&app).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_search(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> R<crate::kb::KbSearchResponse> {
+    crate::kb::search_kb(&app, &query, limit.unwrap_or(20)).map_err(e)
+}
+
+#[tauri::command]
+pub async fn kb_pick_folder(app: AppHandle) -> R<Option<crate::kb::KbSyncSummary>> {
+    let cur_dir = crate::kb::get_kb_root(&app).to_string_lossy().to_string();
+    let picked = tokio::task::spawn_blocking(move || {
+        crate::engine::pick_folder_dialog_with_title(&cur_dir, "选择个人知识库根文件夹")
+    })
+    .await
+    .map_err(e)?;
+
+    if let Some(new_path) = picked {
+        let st = app.state::<crate::AppState>();
+        let mut s = st.settings.get();
+        s.knowledge.base_path = new_path.clone();
+        let _ = st.settings.set(s);
+        let path_obj = std::path::PathBuf::from(&new_path);
+        let _ = crate::kb::ensure_kb_dirs(&path_obj);
+
+        // 自动触发全量扫描并构建新文件夹的文本索引
+        let summary = tokio::task::spawn_blocking(move || {
+            crate::kb::sync_kb_index(&path_obj)
+        })
+        .await
+        .map_err(e)?
+        .map_err(e)?;
+
+        Ok(Some(summary))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub async fn kb_sync_index(app: AppHandle) -> R<crate::kb::KbSyncSummary> {
+    let root = crate::kb::get_kb_root(&app);
+    tokio::task::spawn_blocking(move || {
+        crate::kb::sync_kb_index(&root)
+    })
+    .await
+    .map_err(e)?
+    .map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_laya_status(app: AppHandle) -> R<crate::kb::LayaStatus> {
+    Ok(crate::kb::check_laya_status(&app))
+}
+
+#[tauri::command]
+pub async fn kb_download_laya(
+    app: AppHandle,
+    on_progress: Channel<crate::engine::DownloadProgress>,
+) -> R<crate::kb::LayaStatus> {
+    crate::kb::download_laya_model(&app, on_progress).await.map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_delete_laya(app: AppHandle) -> R<()> {
+    crate::kb::delete_laya_model(&app).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_open_file(path: String) -> R<()> {
+    crate::kb::open_kb_file(&path).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_reveal_file(path: String) -> R<()> {
+    crate::kb::reveal_kb_file(&path).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_read_image_base64(path: String) -> R<String> {
+    crate::kb::read_image_base64(&path).map_err(e)
+}
+
+// ---------- 文档编辑器 (Markdown 查看与修改器) ----------
+
+#[tauri::command]
+pub fn doc_read_file(app: AppHandle, path: String) -> R<crate::kb::DocFileInfo> {
+    crate::kb::read_doc_file(&app, &path).map_err(e)
+}
+
+#[tauri::command]
+pub fn doc_write_file(app: AppHandle, path: String, content: String) -> R<crate::kb::DocWriteResult> {
+    crate::kb::write_doc_file(&app, &path, &content).map_err(e)
+}
+
+#[tauri::command]
+pub fn doc_open_editor(app: AppHandle, path: Option<String>, query: Option<String>) {
+    crate::wins::open_doc_editor(&app, path, query);
+}
+
+#[tauri::command]
+pub fn doc_get_pending(app: AppHandle) -> Option<(String, Option<String>)> {
+    let st = app.state::<crate::AppState>();
+    st.pending_doc.lock().unwrap().take()
+}
+
+#[tauri::command]
+pub fn doc_set_context_menu(enable: bool) -> R<bool> {
+    crate::kb::set_md_context_menu(enable).map_err(e)
+}
+
+#[tauri::command]
+pub fn doc_is_context_menu_registered() -> bool {
+    crate::kb::is_md_context_menu_registered()
+}
+
 
 

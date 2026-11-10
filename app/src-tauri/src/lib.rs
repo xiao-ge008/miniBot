@@ -11,6 +11,7 @@ mod hotkeys;
 mod imgsearch;
 mod imgutil;
 mod jobobj;
+mod kb;
 mod llm;
 mod localsend;
 mod ocr;
@@ -54,12 +55,44 @@ pub struct AppState {
     pub gateway_error: Mutex<Option<String>>,
     pub hotkey_map: Mutex<HashMap<u32, String>>,
     pub hotkey_errors: Mutex<Vec<String>>,
+    pub pending_doc: Mutex<Option<(String, Option<String>)>>,
+}
+
+/// 解析命令行启动参数中的待编辑 Markdown 文件路径
+pub fn extract_edit_path(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--edit" {
+            if let Some(next) = iter.next() {
+                if !next.starts_with('-') {
+                    return Some(next.clone());
+                }
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--edit=") {
+            if !stripped.is_empty() {
+                return Some(stripped.to_string());
+            }
+        } else if !arg.starts_with('-') {
+            let p = std::path::Path::new(arg);
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                let lext = ext.to_lowercase();
+                if (lext == "md" || lext == "markdown" || lext == "mdown" || lext == "mdx" || lext == "txt") && p.exists() {
+                    return Some(arg.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(edit_path) = extract_edit_path(&args) {
+                wins::open_doc_editor(app, Some(edit_path), None);
+                return;
+            }
             let ls_paths = localsend::extract_cli_paths(&args);
             if !ls_paths.is_empty() {
                 let mut p = payload::Payload::text(String::new(), payload::Origin::External, None, 0);
@@ -103,6 +136,7 @@ pub fn run() {
                 gateway_error: Mutex::new(None),
                 hotkey_map: Mutex::new(HashMap::new()),
                 hotkey_errors: Mutex::new(vec![]),
+                pending_doc: Mutex::new(None),
             });
 
             tray::setup(&handle)?;
@@ -117,14 +151,18 @@ pub fn run() {
             gateway::spawn(handle.clone());
             localsend::spawn_daemon();
 
-            // 自动注册系统文件/文件夹右键菜单「发送局域网文件 (LocalSend)」（Windows 注册表 / macOS Finder 服务）
+            // 自动注册系统文件/文件夹右键菜单「发送局域网文件 (LocalSend)」与「使用 miniBot 编辑 Markdown」
             let _ = localsend::set_context_menu_registered(true);
+            let _ = kb::set_md_context_menu(true);
 
-            // 若通过右键菜单传入 --localsend <文件路径> 启动，则直接打开 LocalSend 发送窗口
+            // 若通过命令行或右键菜单传入 --edit 或直接打开 Markdown 文件
             let cli_args: Vec<String> = std::env::args().collect();
+            let edit_target = extract_edit_path(&cli_args);
             let ls_paths = localsend::extract_cli_paths(&cli_args);
             let is_autostart = cli_args.iter().any(|a| a == "--autostart" || a == "--silent");
-            if !ls_paths.is_empty() {
+            if let Some(target) = edit_target {
+                wins::open_doc_editor(&handle, Some(target), None);
+            } else if !ls_paths.is_empty() {
                 let mut p = payload::Payload::text(String::new(), payload::Origin::External, None, 0);
                 p.kind = payload::PayloadKind::File;
                 p.meta = serde_json::json!({ "files": ls_paths });
@@ -238,6 +276,26 @@ pub fn run() {
             commands::recorder_status,
             commands::recorder_reveal,
             commands::recorder_copy_file,
+            commands::kb_save_clip,
+            commands::kb_save_image,
+            commands::kb_save_web,
+            commands::kb_get_stats,
+            commands::kb_open_folder,
+            commands::kb_search,
+            commands::kb_pick_folder,
+            commands::kb_sync_index,
+            commands::kb_laya_status,
+            commands::kb_download_laya,
+            commands::kb_delete_laya,
+            commands::kb_open_file,
+            commands::kb_reveal_file,
+            commands::kb_read_image_base64,
+            commands::doc_read_file,
+            commands::doc_write_file,
+            commands::doc_open_editor,
+            commands::doc_get_pending,
+            commands::doc_set_context_menu,
+            commands::doc_is_context_menu_registered,
         ])
         .build(tauri::generate_context!())
         .expect("miniBot 启动失败");

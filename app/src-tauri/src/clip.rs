@@ -17,6 +17,8 @@ pub struct ClipWatcher {
     ignore_seq: AtomicU32,
     /// 最近一次触发的文本与毫秒时间戳（仅用于 500ms 内的单次按键重复去抖）
     last_text: Mutex<(String, u64)>,
+    /// 最近一次写入或捕获的图片特征 (宽, 高, 字节大小, 时间戳)，防止截屏复制等自身写入触发二次 Tip
+    last_image_sig: Mutex<Option<(usize, usize, usize, u64)>>,
 }
 
 fn now() -> u64 {
@@ -105,6 +107,25 @@ impl ClipWatcher {
         self.ignore_seq.store(crate::winutil::clipboard_seq(), Ordering::SeqCst);
     }
 
+    /// 登记自身即将写入或刚写入的图片指纹，防止剪贴板监听二次弹 Tip
+    pub fn record_self_image(&self, width: usize, height: usize, byte_len: usize) {
+        let mut last_sig = self.last_image_sig.lock().unwrap();
+        *last_sig = Some((width, height, byte_len, now_ms()));
+    }
+
+    /// 检查图片是否与最近写入的指纹匹配或短时间内重复
+    pub fn should_ignore_image(&self, width: usize, height: usize, byte_len: usize) -> bool {
+        let ts = now_ms();
+        let mut last_sig = self.last_image_sig.lock().unwrap();
+        if let Some((lw, lh, llen, lts)) = *last_sig {
+            if lw == width && lh == height && llen == byte_len && ts.saturating_sub(lts) < 2500 {
+                return true;
+            }
+        }
+        *last_sig = Some((width, height, byte_len, ts));
+        false
+    }
+
     pub fn spawn(app: AppHandle) {
         #[cfg(windows)]
         Self::spawn_mouse_selection(app.clone());
@@ -154,6 +175,10 @@ impl ClipWatcher {
                 } else if let Some(img) = read_image_retry() {
                     last_seq = crate::winutil::clipboard_seq();
                     if img.width < 8 || img.height < 8 {
+                        continue;
+                    }
+                    if w.should_ignore_image(img.width, img.height, img.bytes.len()) {
+                        crate::log_msg(&app, format!("[clip] 忽略自身写入或短时间内重复图片 ({}x{})", img.width, img.height));
                         continue;
                     }
                     let Some(rgba) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) else { continue };

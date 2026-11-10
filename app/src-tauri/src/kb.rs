@@ -159,7 +159,12 @@ pub async fn save_image(
     }
 
     if let Some(desc) = vision_desc.filter(|s| !s.trim().is_empty()) {
-        md_content.push_str(&format!("## 🖼️ 深度视觉特征与内容解析\n\n{}\n\n", desc.trim()));
+        let trimmed = desc.trim();
+        if trimmed.starts_with('#') {
+            md_content.push_str(&format!("{trimmed}\n\n"));
+        } else {
+            md_content.push_str(&format!("## 🖼️ 深度视觉特征与内容解析\n\n{trimmed}\n\n"));
+        }
     }
 
     if let Some(ocr) = ocr_text.filter(|s| !s.trim().is_empty()) {

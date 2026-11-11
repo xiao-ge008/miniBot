@@ -726,7 +726,7 @@ mod imp {
         vec![]
     }
 
-    extern "C" {
+    unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
     }

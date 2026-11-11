@@ -78,7 +78,8 @@ pub fn refresh(app: &AppHandle) {
     let Some(item) = STATUS_ITEM.get() else { return };
     let st = app.state::<crate::AppState>();
     let info = st.llm.status_info(&st.settings.get().llm);
-    let text = if info.api_enabled {
+    let kb_q = st.kb_queue.status();
+    let base_text = if info.api_enabled {
         let m = if info.api_model.is_empty() { "OpenAI API" } else { &info.api_model };
         format!("☁️ 模型：云端 API（{m}）")
     } else {
@@ -88,6 +89,11 @@ pub fn refresh(app: &AppHandle) {
             Status::Ready => format!("🟢 模型：已加载（{}:{:02} 后释放）", info.remaining_secs / 60, info.remaining_secs % 60),
             Status::Yielded => "🟡 模型：已让道（显卡忙）".to_string(),
         }
+    };
+    let text = if kb_q.total_in_flight > 0 {
+        format!("{base_text} | 📥 入库队列 {}/{}", kb_q.total_in_flight, kb_q.max_size)
+    } else {
+        base_text
     };
     let _ = item.set_text(text);
     if let Some(t) = app.tray_by_id("main") {
@@ -101,6 +107,19 @@ pub fn refresh(app: &AppHandle) {
                 Status::Yielded => "已让道",
             }
         };
-        let _ = t.set_tooltip(Some(format!("miniBot · {tip_label}")));
+        let tip = if kb_q.total_in_flight > 0 {
+            let cur = kb_q
+                .active
+                .as_ref()
+                .map(|a| a.stage_label.as_str())
+                .unwrap_or("排队处理中…");
+            format!(
+                "miniBot · {tip_label}\n📥 知识库后台处理 {}/{}: {cur}",
+                kb_q.total_in_flight, kb_q.max_size
+            )
+        } else {
+            format!("miniBot · {tip_label}")
+        };
+        let _ = t.set_tooltip(Some(tip));
     }
 }

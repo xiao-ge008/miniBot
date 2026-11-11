@@ -126,23 +126,37 @@
 
   let savedKb = $state(false);
   let savingKb = $state(false);
+  let kbBtnLabel = $state('');
+  let kbBtnTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function doSaveKb() {
     if (savingKb) return;
     savingKb = true;
+    clearTimeout(kbBtnTimer);
     try {
-      if (payload.image) {
-        await ipc.saveImageToKnowledgeWithVision(
-          payload.image,
-          payload.origin,
-          payload.text,
-          cleanOutput || undefined,
-        );
-      } else if (cleanOutput || payload.text) {
-        await ipc.kbSaveClip(cleanOutput || payload.text || '', payload.origin);
+      const res = payload.image
+        ? await ipc.enqueueImageToKnowledge(
+            payload.image,
+            payload.origin,
+            payload.text,
+            cleanOutput || undefined,
+          )
+        : await ipc.kbEnqueueSave({
+            kind: 'clip',
+            text: cleanOutput || payload.text || '',
+            source_app: payload.origin,
+          });
+      if (res.accepted) {
+        savedKb = true;
+        kbBtnLabel = `✓ 已入队(${res.in_flight}/${res.max_size})`;
+      } else {
+        savedKb = false;
+        kbBtnLabel = `⏳ 队列满(${res.in_flight}/${res.max_size})稍等`;
       }
-      savedKb = true;
-      setTimeout(() => (savedKb = false), 2500);
+      kbBtnTimer = setTimeout(() => {
+        savedKb = false;
+        kbBtnLabel = '';
+      }, 2500);
     } catch (e) {
       console.error('存入知识库失败:', e);
     } finally {
@@ -415,9 +429,9 @@
           class:ok={savedKb}
           onclick={doSaveKb}
           disabled={savingKb}
-          title="存入知识库：自动提取 OCR 并进行视觉整理生成伴生文档 (快捷键 Ctrl+K)"
+          title="加入知识库后台队列（最多排队 10 项，自动视觉识别或提纯入库）"
         >
-          <span>{savingKb ? '整理中…' : savedKb ? '✓ 已存入' : '🧠 存知识库'}</span>
+          <span>{savingKb ? '入队中…' : kbBtnLabel || (savedKb ? '✓ 已入队' : '🧠 存知识库')}</span>
         </button>
       </div>
 

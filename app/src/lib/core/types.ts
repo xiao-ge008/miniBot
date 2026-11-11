@@ -182,6 +182,37 @@ export interface KnowledgeSettings {
   auto_search: boolean;
   candidate_count: number;
   top_k: number;
+  clip_auto_distill: boolean;
+}
+
+export interface PromptTemplate {
+  category: 'vision' | 'clip' | string;
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  max_tokens: number;
+  temperature: number;
+  path: string;
+  is_builtin: boolean;
+  modified_ms: number;
+  content: string;
+  body: string;
+}
+
+export interface VisionAnalysisResult {
+  detectedType: string;
+  template: PromptTemplate | null;
+  ocrText: string;
+  rawAnalysis: string;
+  finalVisionDesc: string;
+  elapsedMs: number;
+}
+
+export interface ClipDistillResult {
+  template: PromptTemplate | null;
+  summary: string;
+  elapsedMs: number;
 }
 
 export interface LayaStatus {
@@ -480,5 +511,55 @@ export interface RecorderStateInfo {
   file_size_bytes: number;
   error?: string | null;
 }
+
+export interface KbQueueInput {
+  kind: 'image' | 'clip' | 'web';
+  title?: string | null;
+  text?: string | null;
+  url?: string | null;
+  image_data?: string | null;
+  existing_ocr?: string | null;
+  existing_vision?: string | null;
+  source_app?: string | null;
+  force_type?: string | null;
+}
+
+export interface KbQueueTaskInfo {
+  id: string;
+  kind: string;
+  title: string;
+  source_app?: string | null;
+  stage: 'queued' | 'starting' | 'ocr' | 'classify' | 'extract' | 'distill' | 'saving' | 'done' | 'error' | string;
+  stage_label: string;
+  detected_type?: string | null;
+  saved_path?: string | null;
+  error?: string | null;
+  created_at: number;
+  finished_at?: number | null;
+}
+
+export interface KbQueueStatus {
+  max_size: number;
+  active?: KbQueueTaskInfo | null;
+  pending: KbQueueTaskInfo[];
+  active_count: number;
+  pending_count: number;
+  total_in_flight: number;
+  completed_count: number;
+  failed_count: number;
+  recent: KbQueueTaskInfo[];
+  last_notice?: string | null;
+}
+
+export interface KbEnqueueResult {
+  accepted: boolean;
+  task_id?: string | null;
+  position: number;
+  in_flight: number;
+  max_size: number;
+  message: string;
+  status: KbQueueStatus;
+}
+
 
 

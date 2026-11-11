@@ -13,6 +13,8 @@
   let copied = $state(false);
   let savedKb = $state(false);
   let savingKb = $state(false);
+  let kbNotice = $state('');
+  let kbNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let hovering = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let hideMs = 5000;
@@ -65,6 +67,10 @@
     await loadActions();
     payload = p;
     copied = false;
+    savedKb = false;
+    savingKb = false;
+    kbNotice = '';
+    clearTimeout(kbNoticeTimer);
     await fit();
     schedule();
   }
@@ -114,17 +120,35 @@
   async function doSaveKb() {
     if (!payload || savingKb) return;
     clearTimeout(timer);
+    clearTimeout(kbNoticeTimer);
     if (tts.activeId === 'tip-speak') stopSpeak();
     savingKb = true;
+    kbNotice = '';
     try {
-      await ipc.saveToKnowledge(payload);
-      savedKb = true;
-      setTimeout(() => {
+      const res = await ipc.enqueuePayloadToKnowledge(payload);
+      if (res.accepted) {
+        // 入队即消失，由后台队列一一识别并入库
         savedKb = false;
+        kbNotice = '';
         ipc.hideSelf();
-      }, 800);
+        return;
+      }
+      kbNotice = res.message || '后台队列已满（10/10），请稍等片刻';
+      await fit();
+      kbNoticeTimer = setTimeout(() => {
+        kbNotice = '';
+        fit();
+        schedule();
+      }, 2400);
     } catch (e) {
       console.error('存入知识库失败:', e);
+      kbNotice = `入库失败：${e}`;
+      await fit();
+      kbNoticeTimer = setTimeout(() => {
+        kbNotice = '';
+        fit();
+        schedule();
+      }, 2400);
     } finally {
       savingKb = false;
     }
@@ -157,7 +181,9 @@
       schedule();
     }}
   >
-    {#if payload}
+    {#if kbNotice}
+      <div class="kb-notice">⏳ {kbNotice}</div>
+    {:else if payload}
       <div class="row">
         <div class="grip" data-tauri-drag-region title="按住拖动">
           <svg width="6" height="12" viewBox="0 0 6 12" fill="currentColor" style="pointer-events:none">
@@ -330,5 +356,14 @@
     border-radius: 3px;
     border: 1px solid var(--border);
     margin: 0 4px;
+  }
+  .kb-notice {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--warn, #e69d22);
+    white-space: nowrap;
   }
 </style>

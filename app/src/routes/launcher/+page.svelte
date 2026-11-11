@@ -11,6 +11,7 @@
     formatSearchContext,
     ipc,
     onChatCapture,
+    onKbQueueUpdate,
     onLlmStatus,
     onPayload,
     uid,
@@ -32,6 +33,7 @@
     ChatSession,
     ChatStats,
     GpuSnapshot,
+    KbQueueStatus,
     KbSearchHit,
     LlmError,
     SearchHit,
@@ -81,6 +83,9 @@
 
   let kbActionTip = $state('');
   let kbActionTimer: ReturnType<typeof setTimeout> | undefined;
+  let kbQueue = $state<KbQueueStatus | null>(null);
+  let lastKbDoneCount = 0;
+  let lastKbFailCount = 0;
 
   function flashMsg(msg: string, ms = 3000) {
     kbActionTip = msg;
@@ -997,11 +1002,32 @@
       }
     });
     ipc.llmStatus().then((s) => (status = s));
+    const applyKbQueue = (q: KbQueueStatus, isInit = false) => {
+      if (!isInit) {
+        if (q.completed_count > lastKbDoneCount || q.failed_count > lastKbFailCount) {
+          const latest = q.recent[0];
+          if (latest) {
+            flashMsg(
+              latest.stage === 'error'
+                ? `⚠ ${latest.title}：${latest.stage_label}`
+                : `✓ ${latest.title} — ${latest.stage_label}`,
+              3200,
+            );
+          }
+        }
+      }
+      lastKbDoneCount = q.completed_count;
+      lastKbFailCount = q.failed_count;
+      kbQueue = q;
+    };
+    ipc.kbQueueStatus().then((q) => applyKbQueue(q, true)).catch(() => {});
+    const unKbQ = onKbQueueUpdate((q) => applyKbQueue(q, false));
     return () => {
       unP.then((f) => f());
       unC.then((f) => f());
       unS.then((f) => f());
       unF.then((f) => f());
+      unKbQ.then((f) => f());
     };
   });
 </script>
@@ -1188,6 +1214,22 @@
             <button class="ub-btn close" onclick={() => (updateDismissed = true)} title="忽略本次提示">✕</button>
           {/if}
         </div>
+      </div>
+    {/if}
+
+    {#if kbQueue && kbQueue.total_in_flight > 0}
+      <div
+        class="kb-queue-pill"
+        title={kbQueue.pending.length > 0
+          ? `排队等待中：\n${kbQueue.pending.map((p, idx) => `${idx + 1}. ${p.title}`).join('\n')}`
+          : '正在后台执行知识库识别与入库'}
+      >
+        <span class="kb-q-spinner"></span>
+        <span class="kb-q-count">后台入库 {kbQueue.total_in_flight}/{kbQueue.max_size}</span>
+        {#if kbQueue.active}
+          <span class="kb-q-sep">·</span>
+          <span class="kb-q-detail">{kbQueue.active.title}：{kbQueue.active.stage_label}</span>
+        {/if}
       </div>
     {/if}
 
@@ -2981,6 +3023,54 @@
     display: flex;
     align-items: center;
     gap: 3px;
+  }
+
+  .kb-queue-pill {
+    position: fixed;
+    top: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: min(520px, calc(100vw - 40px));
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    z-index: 998;
+    pointer-events: auto;
+  }
+  .kb-q-spinner {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 1.8px solid var(--border);
+    border-top-color: var(--accent-blue);
+    animation: kbSpin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  .kb-q-count {
+    font-weight: 600;
+    color: var(--accent-blue);
+    white-space: nowrap;
+  }
+  .kb-q-sep {
+    opacity: 0.45;
+  }
+  .kb-q-detail {
+    color: var(--fg-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @keyframes kbSpin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .kb-toast {

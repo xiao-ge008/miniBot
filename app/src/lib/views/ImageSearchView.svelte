@@ -101,14 +101,23 @@
     if (savingKb || !payload.image) return;
     savingKb = true;
     try {
-      flash('🧠 正在进行视觉整理并存入知识库…');
       const extraVision = guess ? `搜图识别主题：${guess}` : undefined;
-      await ipc.saveImageToKnowledgeWithVision(payload.image, 'image_search', null, extraVision);
-      savedKb = true;
-      flash('✓ 原图与视觉解析已存入知识库！');
-      setTimeout(() => (savedKb = false), 2500);
+      const res = await ipc.enqueueImageToKnowledge(
+        payload.image,
+        'image_search',
+        null,
+        extraVision,
+        guess ? `搜图 · ${guess}` : undefined,
+      );
+      if (res.accepted) {
+        savedKb = true;
+        flash(`📥 ${res.message}`);
+        setTimeout(() => (savedKb = false), 2200);
+      } else {
+        flash(`⏳ ${res.message}`);
+      }
     } catch (e) {
-      flash(`存库失败: ${e}`);
+      flash(`入库失败: ${e}`);
     } finally {
       savingKb = false;
     }
@@ -119,11 +128,17 @@
     if (busyIdx) return;
     busyIdx = key;
     try {
-      flash('🧠 正在下载并存入知识库…');
+      flash('📥 正在下载图片并加入后台知识库队列…');
       const dataUri = await ipc.fetchRemoteImage(item.image_url);
       const desc = `搜图匹配图：${item.title || ''}\n来源：${item.source_url || ''}`;
-      await ipc.saveImageToKnowledgeWithVision(dataUri, 'image_search_item', null, desc);
-      flash(`✓ 已将搜出的图片存入知识库！`);
+      const res = await ipc.enqueueImageToKnowledge(
+        dataUri,
+        'image_search_item',
+        null,
+        desc,
+        item.title || undefined,
+      );
+      flash(res.accepted ? `📥 ${res.message}` : `⏳ ${res.message}`);
     } catch (e) {
       flash(`存库失败：${e}`);
     } finally {

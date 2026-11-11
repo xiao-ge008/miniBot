@@ -63,6 +63,7 @@ pub async fn save_clip(
     text: &str,
     source_app: Option<&str>,
     url: Option<&str>,
+    distilled_summary: Option<&str>,
 ) -> Result<PathBuf, String> {
     if text.trim().is_empty() {
         return Err("划词内容为空".into());
@@ -89,9 +90,18 @@ pub async fn save_clip(
     if let Some(u) = url.filter(|s| !s.trim().is_empty()) {
         block.push_str(&format!("- **关联链接**：{u}\n"));
     }
-    block.push_str("\n```text\n");
-    block.push_str(text.trim());
-    block.push_str("\n```\n\n---\n\n");
+
+    if let Some(summary) = distilled_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        block.push_str("\n");
+        block.push_str(summary);
+        block.push_str("\n\n<details>\n<summary>📄 原始摘录片段（点击展开）</summary>\n\n```text\n");
+        block.push_str(text.trim());
+        block.push_str("\n```\n\n</details>\n\n---\n\n");
+    } else {
+        block.push_str("\n```text\n");
+        block.push_str(text.trim());
+        block.push_str("\n```\n\n---\n\n");
+    }
 
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -188,6 +198,7 @@ pub async fn save_web(
     url: &str,
     title: Option<&str>,
     content: &str,
+    distilled_summary: Option<&str>,
 ) -> Result<PathBuf, String> {
     let root = get_kb_root(app);
     ensure_kb_dirs(&root).map_err(|e| format!("创建知识库目录失败: {e}"))?;
@@ -209,6 +220,14 @@ pub async fn save_web(
     let file_name = format!("{}_{}.md", now.format("%Y%m%d_%H%M%S"), safe_title);
     let web_path = root.join("web").join(file_name);
 
+    let mut body = String::new();
+    if let Some(summary) = distilled_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str("## ✨ AI 提纯与总结\n\n");
+        body.push_str(summary);
+        body.push_str("\n\n---\n\n## 📄 原始内容\n\n");
+    }
+    body.push_str(content);
+
     let md = format!(
         "---\nurl: {}\ntitle: {}\ncreated_at: {}\n---\n\n# {}\n\n- **原始网址**：{}\n- **抓取时间**：{}\n\n---\n\n{}\n",
         url,
@@ -217,7 +236,7 @@ pub async fn save_web(
         title.unwrap_or(url),
         url,
         now.format("%Y-%m-%d %H:%M:%S"),
-        content
+        body
     );
 
     std::fs::write(&web_path, md.as_bytes()).map_err(|e| format!("保存网页内容失败: {e}"))?;
@@ -1195,6 +1214,22 @@ pub struct DocWriteResult {
     pub kb_reindexed: bool,
 }
 
+/// 判断路径是否属于参与检索索引的知识库可见文档（排除 .prompts / .sag 等隐藏目录）
+fn is_visible_kb_file(app: &AppHandle, p: &Path) -> bool {
+    let kb_root = get_kb_root(app);
+    if !p.starts_with(&kb_root) {
+        return false;
+    }
+    if let Ok(rel) = p.strip_prefix(&kb_root) {
+        for comp in rel.components() {
+            if comp.as_os_str().to_string_lossy().starts_with('.') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// 读取本地 Markdown / 文本文件内容与元数据
 pub fn read_doc_file(app: &AppHandle, path: &str) -> Result<DocFileInfo, String> {
     let p = Path::new(path);
@@ -1222,8 +1257,7 @@ pub fn read_doc_file(app: &AppHandle, path: &str) -> Result<DocFileInfo, String>
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "未命名.md".to_string());
 
-    let kb_root = get_kb_root(app);
-    let is_kb_file = p.starts_with(&kb_root);
+    let is_kb_file = is_visible_kb_file(app, p);
 
     Ok(DocFileInfo {
         path: path.to_string(),
@@ -1259,8 +1293,7 @@ pub fn write_doc_file(app: &AppHandle, path: &str, content: &str) -> Result<DocW
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let kb_root = get_kb_root(app);
-    let is_kb_file = p.starts_with(&kb_root);
+    let is_kb_file = is_visible_kb_file(app, p);
     let mut kb_reindexed = false;
 
     if is_kb_file {
@@ -1368,6 +1401,446 @@ pub fn read_image_base64(path: &str) -> Result<String, String> {
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
+// ==================== 知识库提示词模板（视觉提取 + 片段提纯与总结） ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTemplate {
+    pub category: String,
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub path: String,
+    pub is_builtin: bool,
+    pub modified_ms: u64,
+    pub content: String,
+    pub body: String,
+}
+
+const BUILTIN_PROMPTS_README: &str = include_str!("../prompts/README.md");
+
+/// 内置提示词模板清单（人物类仅保留唯一模板 vision/character，其余场景/界面/静物/图表各自独立）
+const BUILTIN_PROMPTS: &[(&str, &str, &str)] = &[
+    ("vision", "classifier", include_str!("../prompts/vision/classifier.md")),
+    ("vision", "character", include_str!("../prompts/vision/character.md")),
+    ("vision", "scenery", include_str!("../prompts/vision/scenery.md")),
+    ("vision", "ui_software", include_str!("../prompts/vision/ui_software.md")),
+    ("vision", "object_food", include_str!("../prompts/vision/object_food.md")),
+    ("vision", "document_chart", include_str!("../prompts/vision/document_chart.md")),
+    ("vision", "general", include_str!("../prompts/vision/general.md")),
+    ("clip", "clip_distill", include_str!("../prompts/clip/clip_distill.md")),
+    ("clip", "web_distill", include_str!("../prompts/clip/web_distill.md")),
+];
+
+/// 获取可编辑提示词工作根目录（位于 {kb_root}/.prompts，自动豁免 FTS5 知识库检索污染）
+pub fn get_prompts_root(app: &AppHandle) -> PathBuf {
+    get_kb_root(app).join(".prompts")
+}
+
+/// 优先从安装包资源目录 prompts/{category}/{id}.md 读取出厂模板，回退到编译期嵌入内容
+fn resolve_default_prompt_content(app: &AppHandle, category: &str, id: &str) -> Option<String> {
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("prompts").join(category).join(format!("{id}.md"));
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            return Some(text);
+        }
+    }
+    BUILTIN_PROMPTS
+        .iter()
+        .find(|(c, i, _)| *c == category && *i == id)
+        .map(|(_, _, body)| (*body).to_string())
+}
+
+fn is_builtin_prompt(category: &str, id: &str) -> bool {
+    BUILTIN_PROMPTS.iter().any(|(c, i, _)| *c == category && *i == id)
+}
+
+fn file_mtime_secs(p: &Path) -> u64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 确保工作区提示词目录存在，初始化唯一默认视觉模板 vision/character.md 与文本模板 clip/clip_distill.md；
+/// 用户修改后的工作区提示词永远优先保留，绝不被内置版本覆盖。
+pub fn ensure_prompts_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let prompts_root = get_prompts_root(app);
+    let vision_dir = prompts_root.join("vision");
+    let clip_dir = prompts_root.join("clip");
+    std::fs::create_dir_all(&vision_dir).map_err(|e| format!("创建视觉提示词目录失败: {e}"))?;
+    std::fs::create_dir_all(&clip_dir).map_err(|e| format!("创建片段提示词目录失败: {e}"))?;
+
+    let readme_path = prompts_root.join("README.md");
+    if !readme_path.exists() {
+        let readme_text = app
+            .path()
+            .resource_dir()
+            .ok()
+            .and_then(|d| std::fs::read_to_string(d.join("prompts").join("README.md")).ok())
+            .unwrap_or_else(|| BUILTIN_PROMPTS_README.to_string());
+        let _ = std::fs::write(&readme_path, readme_text.as_bytes());
+    }
+
+    let init_marker = prompts_root.join(".initialized");
+    let first_init = !init_marker.exists();
+    if first_init {
+        for (cat, id, _) in BUILTIN_PROMPTS {
+            let target = prompts_root.join(cat).join(format!("{id}.md"));
+            if !target.exists() {
+                if let Some(content) = resolve_default_prompt_content(app, cat, id) {
+                    let _ = std::fs::write(&target, content.as_bytes());
+                }
+            }
+        }
+        let _ = std::fs::write(&init_marker, b"1");
+    }
+
+    // 若用户在安装目录 prompts/ 内放置或更新了文件（mtime 晚于 exe 10 秒以上且比工作区更新），热同步到工作区
+    let exe_mtime = std::env::current_exe()
+        .ok()
+        .map(|p| file_mtime_secs(&p))
+        .unwrap_or(0);
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let src_root = res_dir.join("prompts");
+        for cat in ["vision", "clip"] {
+            let src_cat = src_root.join(cat);
+            let Ok(entries) = std::fs::read_dir(&src_cat) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let src_file = e.path();
+                if !src_file.is_file() {
+                    continue;
+                }
+                let is_md = src_file
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false);
+                if !is_md {
+                    continue;
+                }
+                let Some(fname) = src_file.file_name() else {
+                    continue;
+                };
+                let dst_file = prompts_root.join(cat).join(fname);
+                let should_copy = if !dst_file.exists() {
+                    first_init
+                } else {
+                    let src_m = file_mtime_secs(&src_file);
+                    let dst_m = file_mtime_secs(&dst_file);
+                    exe_mtime > 0 && src_m > exe_mtime.saturating_add(10) && src_m > dst_m
+                };
+                if should_copy {
+                    if let Ok(content) = std::fs::read(&src_file) {
+                        let _ = std::fs::write(&dst_file, content);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(prompts_root)
+}
+
+/// 解析提示词 Markdown 文件的 YAML Frontmatter 与正文
+fn parse_prompt_markdown(
+    category: &str,
+    stem: &str,
+    path: &Path,
+    raw: &str,
+    modified_ms: u64,
+) -> PromptTemplate {
+    let mut id = stem.to_string();
+    let mut name = stem.to_string();
+    let mut title = format!("🖼️ {stem}");
+    let mut description = String::new();
+    let mut max_tokens: u32 = if category == "vision" && stem == "classifier" {
+        128
+    } else if category == "clip" {
+        1536
+    } else {
+        4096
+    };
+    let mut temperature: f32 = if category == "vision" && stem == "classifier" {
+        0.1
+    } else {
+        0.2
+    };
+    let mut body = raw.trim().to_string();
+
+    let normalized = raw.replace("\r\n", "\n");
+    if let Some(after_open) = normalized.strip_prefix("---\n") {
+        if let Some(close_idx) = after_open.find("\n---\n").or_else(|| after_open.find("\n---")) {
+            let fm = &after_open[..close_idx];
+            let rest = &after_open[close_idx + 4..];
+            body = rest.trim_start_matches('\n').trim().to_string();
+
+            for line in fm.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once(':') {
+                    let key = k.trim();
+                    let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                    if val.is_empty() {
+                        continue;
+                    }
+                    match key {
+                        "id" => id = val.to_string(),
+                        "name" => name = val.to_string(),
+                        "title" => title = val.to_string(),
+                        "description" => description = val.to_string(),
+                        "max_tokens" => {
+                            if let Ok(n) = val.parse::<u32>() {
+                                max_tokens = n.clamp(16, 16384);
+                            }
+                        }
+                        "temperature" => {
+                            if let Ok(t) = val.parse::<f32>() {
+                                temperature = t.clamp(0.0, 2.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    PromptTemplate {
+        category: category.to_string(),
+        id,
+        name,
+        title,
+        description,
+        max_tokens,
+        temperature,
+        path: path.to_string_lossy().to_string(),
+        is_builtin: is_builtin_prompt(category, stem),
+        modified_ms,
+        content: raw.to_string(),
+        body,
+    }
+}
+
+fn read_prompt_file_as_template(category: &str, path: &Path) -> Result<PromptTemplate, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("读取提示词文件失败: {e}"))?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "custom".to_string());
+    let modified_ms = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(parse_prompt_markdown(category, &stem, path, &raw, modified_ms))
+}
+
+/// 按类别和 ID 按需读取单个提示词模板（不同类别彼此隔离，按需加载）
+pub fn get_prompt_template(app: &AppHandle, category: &str, id: &str) -> Result<PromptTemplate, String> {
+    let prompts_root = ensure_prompts_dir(app)?;
+    let safe_cat = match category {
+        "vision" | "clip" => category,
+        _ => return Err(format!("不支持的提示词分类: {category}")),
+    };
+    let clean_id: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if clean_id.is_empty() {
+        return Err("提示词 ID 无效".into());
+    }
+    let file_path = prompts_root.join(safe_cat).join(format!("{clean_id}.md"));
+    if !file_path.exists() {
+        return Err(format!("提示词文件不存在: {safe_cat}/{clean_id}.md"));
+    }
+    read_prompt_file_as_template(safe_cat, &file_path)
+}
+
+/// 列出所有视觉提取与片段提纯提示词模板（内置序优先 + 用户自定义 .md）
+pub fn list_prompt_templates(app: &AppHandle) -> Result<Vec<PromptTemplate>, String> {
+    let prompts_root = ensure_prompts_dir(app)?;
+    let mut out = Vec::new();
+
+    for cat in ["vision", "clip"] {
+        let dir = prompts_root.join(cat);
+        let mut custom_files = Vec::new();
+
+        // 先按内置顺序加载，保证 UI 展示与路由稳定有序
+        let mut seen_ids = std::collections::HashSet::new();
+        for (b_cat, b_id, _) in BUILTIN_PROMPTS {
+            if *b_cat != cat {
+                continue;
+            }
+            let p = dir.join(format!("{b_id}.md"));
+            if p.exists() {
+                if let Ok(tpl) = read_prompt_file_as_template(cat, &p) {
+                    seen_ids.insert(format!("{b_id}.md").to_lowercase());
+                    out.push(tpl);
+                }
+            }
+        }
+
+        // 再扫描用户自行添加的自定义 .md 模板
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let is_md = p
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false);
+                if !is_md {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if fname.eq_ignore_ascii_case("readme.md") || seen_ids.contains(&fname.to_lowercase()) {
+                    continue;
+                }
+                custom_files.push(p);
+            }
+        }
+        custom_files.sort();
+        for p in custom_files {
+            if let Ok(tpl) = read_prompt_file_as_template(cat, &p) {
+                out.push(tpl);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// 恢复指定内置提示词（或全部内置提示词）为出厂默认模板
+pub fn reset_prompt_template(
+    app: &AppHandle,
+    category: Option<&str>,
+    id: Option<&str>,
+) -> Result<Vec<PromptTemplate>, String> {
+    let prompts_root = ensure_prompts_dir(app)?;
+    match (category, id) {
+        (Some(cat), Some(target_id)) => {
+            let content = resolve_default_prompt_content(app, cat, target_id)
+                .ok_or_else(|| format!("未找到内置默认模板: {cat}/{target_id}.md"))?;
+            let path = prompts_root.join(cat).join(format!("{target_id}.md"));
+            std::fs::write(&path, content.as_bytes())
+                .map_err(|e| format!("重置模板文件失败: {e}"))?;
+        }
+        _ => {
+            for (cat, target_id, _) in BUILTIN_PROMPTS {
+                if let Some(filter_cat) = category {
+                    if *cat != filter_cat {
+                        continue;
+                    }
+                }
+                if let Some(content) = resolve_default_prompt_content(app, cat, target_id) {
+                    let path = prompts_root.join(cat).join(format!("{target_id}.md"));
+                    std::fs::write(&path, content.as_bytes())
+                        .map_err(|e| format!("重置模板文件失败: {e}"))?;
+                }
+            }
+        }
+    }
+    list_prompt_templates(app)
+}
+
+/// 新建一个自定义提示词模板 .md 文件，方便扩展新图像分类或新提纯规则
+pub fn create_prompt_template(
+    app: &AppHandle,
+    category: &str,
+    id: &str,
+    name: Option<&str>,
+) -> Result<PromptTemplate, String> {
+    let prompts_root = ensure_prompts_dir(app)?;
+    let safe_cat = match category {
+        "vision" | "clip" => category,
+        _ => return Err("分类必须为 vision 或 clip".into()),
+    };
+    let clean_id: String = id
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let clean_id = clean_id.trim_matches('_').to_string();
+    if clean_id.is_empty() {
+        return Err("模板英文标识 ID 不能为空（建议使用英文字母、数字或下划线，如 anime_cg）".into());
+    }
+
+    let path = prompts_root.join(safe_cat).join(format!("{clean_id}.md"));
+    if path.exists() {
+        return Err(format!("模板 {safe_cat}/{clean_id}.md 已存在"));
+    }
+
+    let display_name = name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&clean_id);
+
+    let skeleton = if safe_cat == "vision" {
+        format!(
+            "---\nid: {clean_id}\nname: {display_name}\ntitle: 🖼️ {display_name}深度解析\ndescription: 自定义视觉提取分类模板\nmax_tokens: 2048\ntemperature: 0.2\n---\n你是一位资深视觉资产分析与知识库索引专家。当前图片属于【{display_name}】类别。\n请对画面进行详尽、结构化、无遗漏的描摹，确保后续全文检索精准命中。\n\n{{{{HINT_CONTEXT}}}}\n{{{{OCR_CONTEXT}}}}\n### 1. 核心主体与场景情境\n\n### 2. 关键细节特征提取\n\n### 3. 全文检索高频关键词库 (Search Keywords)\n请列出 25~45 个逗号分隔的高频检索关键词。\n"
+        )
+    } else {
+        format!(
+            "---\nid: {clean_id}\nname: {display_name}\ntitle: ✂️ {display_name}\ndescription: 自定义文本片段提纯与总结模板\nmax_tokens: 1536\ntemperature: 0.2\n---\n你是一位知识提纯与总结专家。请使用【{display_name}】视角提炼以下片段的核心知识：\n\n{{{{SOURCE_CONTEXT}}}}\n```text\n{{{{CLIP_TEXT}}}}\n```\n\n#### 💡 核心结论\n\n#### 🧩 关键要点\n\n#### 🏷️ 检索关键词库\n"
+        )
+    };
+
+    std::fs::write(&path, skeleton.as_bytes()).map_err(|e| format!("创建模板文件失败: {e}"))?;
+    read_prompt_file_as_template(safe_cat, &path)
+}
+
+/// 在系统文件资源管理器中打开提示词文件夹（work=可编辑目录，builtin=安装资源目录）
+pub fn open_prompts_folder(app: &AppHandle, target: Option<&str>) -> Result<String, String> {
+    let dir = if target == Some("builtin") {
+        app.path()
+            .resource_dir()
+            .map(|d| d.join("prompts"))
+            .unwrap_or_else(|_| get_prompts_root(app))
+    } else {
+        ensure_prompts_dir(app)?
+    };
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开提示词文件夹失败: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开提示词文件夹失败: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开提示词文件夹失败: {e}"))?;
+    }
+
+    Ok(dir.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,5 +1852,30 @@ mod tests {
 
         let kw2 = extract_search_keywords("小雨的经常穿什么衣服");
         assert!(kw2.contains(&"小雨".to_string()), "必须包含'小雨'，实际提取到: {:?}", kw2);
+    }
+
+    #[test]
+    fn test_builtin_prompts_frontmatter() {
+        assert_eq!(
+            BUILTIN_PROMPTS.len(),
+            9,
+            "内置提示词模板应包含 7 个视觉模板（人物仅 character）与 2 个片段模板"
+        );
+        assert!(
+            !BUILTIN_PROMPTS.iter().any(|(_, id, _)| *id == "couple_intimate"),
+            "人物类仅保留唯一的 character，不应包含 couple_intimate"
+        );
+        for (cat, id, content) in BUILTIN_PROMPTS {
+            let tpl = parse_prompt_markdown(cat, id, Path::new("dummy.md"), content, 0);
+            assert_eq!(tpl.id, *id, "模板 id 不匹配: {cat}/{id}");
+            assert!(!tpl.name.is_empty(), "模板 name 为空: {cat}/{id}");
+            assert!(!tpl.body.is_empty(), "模板正文为空: {cat}/{id}");
+            assert!(tpl.max_tokens >= 16);
+        }
+
+        // 无 Frontmatter 时优雅降级
+        let plain = parse_prompt_markdown("vision", "custom", Path::new("custom.md"), "直接描述图片细节", 123);
+        assert_eq!(plain.id, "custom");
+        assert_eq!(plain.body, "直接描述图片细节");
     }
 }

@@ -12,6 +12,7 @@ mod imgsearch;
 mod imgutil;
 mod jobobj;
 mod kb;
+mod kb_queue;
 mod llm;
 mod localsend;
 mod ocr;
@@ -48,6 +49,7 @@ pub fn log_msg(app: &AppHandle, msg: impl AsRef<str>) {
 pub struct AppState {
     pub settings: settings::SettingsStore,
     pub llm: Arc<llm::LlmManager>,
+    pub kb_queue: Arc<kb_queue::KbQueueManager>,
     pub clip: clip::ClipWatcher,
     pub pending: Mutex<HashMap<String, payload::Payload>>,
     pub capture_png: Mutex<Option<Vec<u8>>>,
@@ -129,6 +131,7 @@ pub fn run() {
             app.manage(AppState {
                 settings: store,
                 llm: Arc::new(llm::LlmManager::default()),
+                kb_queue: Arc::new(kb_queue::KbQueueManager::default()),
                 clip: clip::ClipWatcher::default(),
                 pending: Mutex::new(HashMap::new()),
                 capture_png: Mutex::new(None),
@@ -147,6 +150,7 @@ pub fn run() {
             }
             hotkeys::register(&handle);
             llm::LlmManager::spawn_watchdog(handle.clone());
+            handle.state::<AppState>().kb_queue.spawn_worker(handle.clone());
             clip::ClipWatcher::spawn(handle.clone());
             gateway::spawn(handle.clone());
             localsend::spawn_daemon();
@@ -154,6 +158,8 @@ pub fn run() {
             // 自动注册系统文件/文件夹右键菜单「发送局域网文件 (LocalSend)」与「使用 miniBot 编辑 Markdown」
             let _ = localsend::set_context_menu_registered(true);
             let _ = kb::set_md_context_menu(true);
+            // 确保提示词模板目录及默认 .md 提示词文件就位
+            let _ = kb::ensure_prompts_dir(&handle);
 
             // 若通过命令行或右键菜单传入 --edit 或直接打开 Markdown 文件
             let cli_args: Vec<String> = std::env::args().collect();
@@ -290,6 +296,13 @@ pub fn run() {
             commands::kb_open_file,
             commands::kb_reveal_file,
             commands::kb_read_image_base64,
+            commands::kb_get_prompt,
+            commands::kb_list_prompts,
+            commands::kb_reset_prompt,
+            commands::kb_create_prompt,
+            commands::kb_open_prompts_folder,
+            commands::kb_enqueue_save,
+            commands::kb_queue_status,
             commands::doc_read_file,
             commands::doc_write_file,
             commands::doc_open_editor,

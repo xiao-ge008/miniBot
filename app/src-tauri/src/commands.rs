@@ -879,8 +879,17 @@ pub async fn kb_save_clip(
     text: String,
     source_app: Option<String>,
     url: Option<String>,
+    distilled_summary: Option<String>,
 ) -> R<String> {
-    let p = crate::kb::save_clip(&app, &text, source_app.as_deref(), url.as_deref()).await.map_err(e)?;
+    let p = crate::kb::save_clip(
+        &app,
+        &text,
+        source_app.as_deref(),
+        url.as_deref(),
+        distilled_summary.as_deref(),
+    )
+    .await
+    .map_err(e)?;
     Ok(p.to_string_lossy().to_string())
 }
 
@@ -902,8 +911,11 @@ pub async fn kb_save_web(
     url: String,
     title: Option<String>,
     content: String,
+    distilled_summary: Option<String>,
 ) -> R<String> {
-    let p = crate::kb::save_web(&app, &url, title.as_deref(), &content).await.map_err(e)?;
+    let p = crate::kb::save_web(&app, &url, title.as_deref(), &content, distilled_summary.as_deref())
+        .await
+        .map_err(e)?;
     Ok(p.to_string_lossy().to_string())
 }
 
@@ -999,6 +1011,54 @@ pub fn kb_reveal_file(path: String) -> R<()> {
 #[tauri::command]
 pub fn kb_read_image_base64(path: String) -> R<String> {
     crate::kb::read_image_base64(&path).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_get_prompt(app: AppHandle, category: String, id: String) -> R<crate::kb::PromptTemplate> {
+    crate::kb::get_prompt_template(&app, &category, &id).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_list_prompts(app: AppHandle) -> R<Vec<crate::kb::PromptTemplate>> {
+    crate::kb::list_prompt_templates(&app).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_reset_prompt(
+    app: AppHandle,
+    category: Option<String>,
+    id: Option<String>,
+) -> R<Vec<crate::kb::PromptTemplate>> {
+    crate::kb::reset_prompt_template(&app, category.as_deref(), id.as_deref()).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_create_prompt(
+    app: AppHandle,
+    category: String,
+    id: String,
+    name: Option<String>,
+) -> R<crate::kb::PromptTemplate> {
+    crate::kb::create_prompt_template(&app, &category, &id, name.as_deref()).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_open_prompts_folder(app: AppHandle, target: Option<String>) -> R<String> {
+    crate::kb::open_prompts_folder(&app, target.as_deref()).map_err(e)
+}
+
+#[tauri::command]
+pub fn kb_enqueue_save(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    input: crate::kb_queue::KbQueueInput,
+) -> crate::kb_queue::KbEnqueueResult {
+    st.kb_queue.enqueue(&app, input)
+}
+
+#[tauri::command]
+pub fn kb_queue_status(st: State<'_, AppState>) -> crate::kb_queue::KbQueueStatus {
+    st.kb_queue.status()
 }
 
 // ---------- 文档编辑器 (Markdown 查看与修改器) ----------

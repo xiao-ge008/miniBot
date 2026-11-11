@@ -344,6 +344,8 @@ pub struct KnowledgeSettings {
     pub candidate_count: usize,
     /// 最终向模型提供的证据片段数量（默认 5）
     pub top_k: usize,
+    /// 保存文本/网页片段时是否自动调用 AI 提纯与总结（默认 true）
+    pub clip_auto_distill: bool,
 }
 
 pub fn default_knowledge_dir() -> PathBuf {
@@ -370,6 +372,7 @@ impl Default for KnowledgeSettings {
             auto_search: false,
             candidate_count: 20,
             top_k: 5,
+            clip_auto_distill: true,
         }
     }
 }

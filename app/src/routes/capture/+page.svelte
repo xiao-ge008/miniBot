@@ -681,14 +681,17 @@
         break;
       }
       case 'save_kb': {
-        toast = '🧠 正在进行视觉整理并存入知识库…';
         try {
-          await ipc.saveImageToKnowledgeWithVision(data, 'capture');
-          toast = '✓ 原图与视觉解析已存入知识库！';
-          setTimeout(() => close(), 600);
+          const res = await ipc.enqueueImageToKnowledge(data, 'capture');
+          if (res.accepted) {
+            close();
+          } else {
+            toast = `⏳ ${res.message}`;
+            setTimeout(() => (toast = ''), 2800);
+          }
         } catch (e) {
-          toast = `存库失败: ${e}`;
-          setTimeout(() => (toast = ''), 3000);
+          toast = `入队失败: ${e}`;
+          setTimeout(() => (toast = ''), 2800);
         }
         break;
       }

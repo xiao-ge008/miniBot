@@ -114,6 +114,12 @@ export const ipc = {
       }
     }
 
+    // 过滤可能存在的思考链过程 (<think>...</think>)，防止模型内部思考污染知识库正文
+    const cleanThink = (str?: string | null): string => {
+      if (!str) return '';
+      return str.replace(/<think>[\s\S]*?(<\/think>|$)/gi, '').trim();
+    };
+
     // =========================================================================
     // 阶段一：极速图像类型判定 (Fast Image Classification)
     // 耗时 < 0.5 秒，快速判别图片核心类型，以便加载对应领域的终极专家提示词
@@ -153,7 +159,7 @@ export const ipc = {
           },
         },
       );
-      const cleanCls = clsRaw.toLowerCase().trim();
+      const cleanCls = cleanThink(clsRaw).toLowerCase().trim();
       if (cleanCls.includes('character') || cleanCls.includes('人物') || cleanCls.includes('角色') || cleanCls.includes('立绘')) {
         detectedType = 'character';
       } else if (cleanCls.includes('scenery') || cleanCls.includes('风景') || cleanCls.includes('建筑') || cleanCls.includes('街景')) {
@@ -173,7 +179,8 @@ export const ipc = {
     // 阶段二：针对命中类型的专家特化深度提示词 (Type-Specialized Profiler)
     // 让人类或AI后续以“穿什么衣服”、“什么风景光影”、“什么报错文字”都能精准命中
     // =========================================================================
-    const hintContext = existingVision?.trim() ? `【已知前置线索/问答主题】：\n${existingVision.trim()}\n\n` : '';
+    const pureExistingVision = cleanThink(existingVision);
+    const hintContext = pureExistingVision ? `【已知前置线索/问答主题】：\n${pureExistingVision}\n\n` : '';
     const ocrContext = ocrText.trim() ? `【画面中提取到的文字原词】：\n${ocrText.slice(0, 500).trim()}\n\n` : '';
 
     let specializedPrompt = '';
@@ -358,20 +365,20 @@ ${hintContext}${ocrContext}
           },
         },
       );
-      aiVisionAnalysis = collected.trim();
+      aiVisionAnalysis = cleanThink(collected);
     } catch (e) {
       console.warn('视觉特化深度解析调用异常，降级保存:', e);
     }
 
     // 组合最终存储的视觉描述（保留前置线索，融合专家模型穷尽式细节，冠以分类标签）
     let finalVisionDesc = `## ${categoryTitle}\n\n`;
-    if (existingVision?.trim()) {
-      finalVisionDesc += `### 📌 问答/主题摘要\n${existingVision.trim()}\n\n`;
+    if (pureExistingVision) {
+      finalVisionDesc += `### 📌 问答/主题摘要\n${pureExistingVision}\n\n`;
     }
     if (aiVisionAnalysis) {
       finalVisionDesc += aiVisionAnalysis;
-    } else if (existingVision?.trim()) {
-      finalVisionDesc += existingVision.trim();
+    } else if (pureExistingVision) {
+      finalVisionDesc += pureExistingVision;
     }
 
     // 3. 后端保存原图与伴生同名 Markdown 文件

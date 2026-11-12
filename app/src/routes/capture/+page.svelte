@@ -5,6 +5,7 @@
   import { execute, loadActions } from '$lib/core/actions';
   import { toHex, toRgbStr, type RGB } from '$lib/core/color';
   import type { Payload } from '$lib/core/types';
+  import { matchesCaptureReset, parseCaptureMeta, toCapturePoint } from '$lib/core/capture-utils';
 
   type Rect = { x: number; y: number; w: number; h: number };
   type Tool = 'rect' | 'ellipse' | 'arrow' | 'pen' | 'text' | 'number' | 'mosaic' | 'blur';
@@ -77,6 +78,53 @@
   let barW = $state(0);
   let barH = $state(0);
   let raf = 0;
+  let sessionId: string | null = null;
+  let loadGeneration = 0;
+  let frameAbort: AbortController | null = null;
+  let activePointerId: number | null = null;
+  let isWindows = $state(false);
+  let softwareCursor = $state(false);
+  let softwareCursorElement: HTMLDivElement | undefined;
+  const CURSOR_STORAGE_KEY = 'minibot.capture.softwareCursor';
+
+  function moveSoftwareCursor(e: MouseEvent | PointerEvent) {
+    if (!softwareCursorElement) return;
+    softwareCursorElement.style.transform = `translate3d(${e.clientX - 10}px, ${e.clientY - 10}px, 0)`;
+    softwareCursorElement.style.visibility = softwareCursor ? 'visible' : 'hidden';
+  }
+
+  function hideSoftwareCursor() {
+    if (softwareCursorElement) softwareCursorElement.style.visibility = 'hidden';
+  }
+
+  function toggleSoftwareCursor() {
+    softwareCursor = !softwareCursor;
+    try { localStorage.setItem(CURSOR_STORAGE_KEY, softwareCursor ? '1' : '0'); } catch { /* 隐私模式不持久化 */ }
+    updateCursor(mouse);
+    if (!softwareCursor) hideSoftwareCursor();
+    toast = softwareCursor ? '已开启软件光标：由实际鼠标事件驱动（F8 切换）' : '已恢复系统光标';
+    render();
+  }
+
+  function releasePointer() {
+    const id = activePointerId;
+    activePointerId = null;
+    if (overlay && id !== null) {
+      try { if (overlay.hasPointerCapture(id)) overlay.releasePointerCapture(id); } catch { /* 窗口隐藏时可能已释放 */ }
+    }
+  }
+
+  function stopInteraction() {
+    releasePointer();
+    if (phase === 'selecting' || phase === 'moving' || phase === 'resizing' || phase === 'drawing') {
+      phase = sel && sel.w > 2 && sel.h > 2 ? 'selected' : 'idle';
+      if (phase === 'idle') sel = null;
+      drawing = null;
+    }
+    updateCursor(mouse);
+    hideSoftwareCursor();
+    render();
+  }
 
   // 极简录屏参数状态
   let recMode = $state(false);
@@ -110,7 +158,7 @@
 
   // ---------- 坐标 ----------
   const k = () => window.innerWidth / Math.max(W, 1); // CSS px / 物理 px
-  const toPhys = (e: MouseEvent | PointerEvent) => ({ x: Math.round(e.clientX / k()), y: Math.round(e.clientY / k()) });
+  const toPhys = (e: MouseEvent | PointerEvent) => toCapturePoint(e.clientX, e.clientY, W, H, window.innerWidth, window.innerHeight);
   const norm = (x1: number, y1: number, x2: number, y2: number): Rect => ({
     x: Math.min(x1, x2),
     y: Math.min(y1, y2),
@@ -322,8 +370,12 @@
   }
 
   function render() {
-    cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(drawNow);
+    // 一帧最多重绘一次，高频鼠标事件只更新坐标，不反复取消待绘制帧。
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      drawNow();
+    });
   }
 
   // ---------- 马赛克 ----------
@@ -349,14 +401,11 @@
 
   // ---------- 鼠标与指针拖拽 ----------
   function onPointerDown(e: PointerEvent) {
+    if (!sessionId || !img) return;
     if (toolMenuOpen) toolMenuOpen = false;
-    if (e.button === 2) return;
-    if (overlay && e.pointerId !== undefined) {
-      try {
-        overlay.setPointerCapture(e.pointerId);
-      } catch {}
-    }
+    if (e.button !== 0 || !e.isPrimary || activePointerId !== null) return;
     const p = toPhys(e);
+    moveSoftwareCursor(e);
     if (textEdit) {
       const hadText = textEdit.value.trim().length > 0;
       commitText();
@@ -368,6 +417,10 @@
       copyColor(false, true);
       return;
     }
+    activePointerId = e.pointerId;
+    try { overlay?.setPointerCapture(e.pointerId); } catch { /* 仍可接收画布内的指针事件 */ }
+    // 点击位置重新命中，不依赖上一条悬停事件是否送达。
+    hoverWin = windows.find((r) => inRect(r, p.x, p.y)) ?? null;
     if (sel && tool && inRect(sel, p.x, p.y)) {
       if (tool === 'text') {
         e.preventDefault();
@@ -424,6 +477,8 @@
   }
 
   function onPointerMove(e: PointerEvent) {
+    if (activePointerId !== null && e.pointerId !== activePointerId) return;
+    moveSoftwareCursor(e);
     const p = toPhys(e);
     mouse = p;
     if (phase === 'idle') {
@@ -460,15 +515,16 @@
   }
 
   function onPointerUp(e: PointerEvent) {
-    if (overlay && e.pointerId !== undefined) {
-      try {
-        overlay.releasePointerCapture(e.pointerId);
-      } catch {}
-    }
+    if (activePointerId !== e.pointerId) return;
     const p = toPhys(e);
+    mouse = p;
+    moveSoftwareCursor(e);
     if (phase === 'selecting') {
       const moved = Math.abs(p.x - down.x) > 4 || Math.abs(p.y - down.y) > 4;
-      if (!moved) sel = hoverWin ? { ...hoverWin } : { x: 0, y: 0, w: W, h: H };
+      if (!moved) {
+        const clickedWindow = windows.find((r) => inRect(r, p.x, p.y));
+        sel = clickedWindow ? { ...clickedWindow } : { x: 0, y: 0, w: W, h: H };
+      }
       phase = sel && sel.w > 2 && sel.h > 2 ? 'selected' : 'idle';
       if (phase === 'idle') sel = null;
       else detectQr();
@@ -482,25 +538,17 @@
       const tiny = 'x2' in d && Math.abs(d.x2 - d.x1) < 3 && Math.abs(d.y2 - d.y1) < 3;
       if (!tiny) pushShape(d);
     }
+    releasePointer();
     updateCursor(p);
     render();
   }
 
   function onPointerCancel(e: PointerEvent) {
-    if (overlay && e.pointerId !== undefined) {
-      try {
-        overlay.releasePointerCapture(e.pointerId);
-      } catch {}
-    }
-    if (phase === 'selecting') {
-      phase = sel ? 'selected' : 'idle';
-    } else if (phase === 'moving' || phase === 'resizing') {
-      phase = 'selected';
-    } else if (phase === 'drawing') {
-      drawing = null;
-      phase = 'selected';
-    }
-    render();
+    if (activePointerId === e.pointerId) stopInteraction();
+  }
+
+  function onLostPointerCapture(e: PointerEvent) {
+    if (activePointerId === e.pointerId) stopInteraction();
   }
 
   let currentCursor = '';
@@ -512,7 +560,8 @@
       else if (inRect(sel, p.x, p.y)) c = tool ? (tool === 'text' ? 'text' : 'crosshair') : 'move';
       else c = 'default';
     }
-    if (overlay && currentCursor !== c) {
+    if (softwareCursor) c = 'none';
+    if (overlay && (currentCursor !== c || overlay.style.cursor !== c)) {
       currentCursor = c;
       overlay.style.cursor = c;
     }
@@ -605,12 +654,17 @@
   let qrTimer: ReturnType<typeof setTimeout> | undefined;
   function detectQr() {
     clearTimeout(qrTimer);
+    const generation = loadGeneration;
     qrTimer = setTimeout(async () => {
-      if (!sel) return;
+      if (!sel || generation !== loadGeneration) return;
+      const region = { ...sel };
+      const current = () => generation === loadGeneration && sel !== null &&
+        sel.x === region.x && sel.y === region.y && sel.w === region.w && sel.h === region.h;
       try {
-        qrCount = (await ipc.qrDecode(exportImage(false, false))).length;
+        const count = (await ipc.qrDecode(exportImage(false, false))).length;
+        if (current()) qrCount = count;
       } catch {
-        qrCount = 0;
+        if (current()) qrCount = 0;
       }
     }, 200);
   }
@@ -729,7 +783,7 @@
   }
 
   async function startRecord() {
-    if (recStarting) return;
+    if (recStarting || !sessionId || !img) return;
     const r = sel ?? { x: 0, y: 0, w: W, h: H };
     recStarting = true;
     try {
@@ -763,7 +817,7 @@
 
   function clearCanvases() {
     if (base && overlay) {
-      const bctx = base.getContext('2d');
+      const bctx = base.getContext('2d', { willReadFrequently: true });
       const octx = overlay.getContext('2d');
       if (bctx && base.width > 0 && base.height > 0) bctx.clearRect(0, 0, base.width, base.height);
       if (octx && overlay.width > 0 && overlay.height > 0) octx.clearRect(0, 0, overlay.width, overlay.height);
@@ -771,6 +825,19 @@
   }
 
   function resetAll() {
+    loadGeneration++;
+    sessionId = null;
+    frameAbort?.abort();
+    frameAbort = null;
+    releasePointer();
+    cancelAnimationFrame(raf);
+    raf = 0;
+    clearTimeout(qrTimer);
+    drawing = null;
+    start = null;
+    handle = -1;
+    toast = '';
+    hideSoftwareCursor();
     phase = 'idle';
     sel = null;
     shapes = [];
@@ -785,6 +852,7 @@
     qrCount = 0;
     hoverWin = null;
     currentCursor = '';
+    if (overlay) overlay.style.cursor = 'crosshair';
     img = null;
     pixels = null;
     if (prevBlobUrl) {
@@ -795,15 +863,22 @@
   }
 
   function close() {
+    const id = sessionId;
     const returnToChat = mode === 'chat';
     resetAll();
-    ipc.captureClose();
-    if (returnToChat) {
-      ipc.trigger('launcher');
+    if (id) {
+      void ipc.captureClose(id).then(() => {
+        if (returnToChat) return ipc.trigger('launcher');
+      }).catch((error: unknown) => console.error('关闭截图失败', error));
     }
   }
 
   function onKey(e: KeyboardEvent) {
+    if (e.key === 'F8' && isWindows && !e.repeat) {
+      e.preventDefault();
+      toggleSoftwareCursor();
+      return;
+    }
     if (toolMenuOpen && e.key === 'Escape') {
       toolMenuOpen = false;
       return;
@@ -816,6 +891,7 @@
       if (e.key === 'Escape') sizeEdit = false;
       return;
     }
+    if (!sessionId || !img) return;
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
     if (e.key === 'Escape') close();
@@ -831,6 +907,7 @@
       sel = { x: 0, y: 0, w: W, h: H };
       phase = 'selected';
       detectQr();
+      updateCursor(mouse);
       render();
     } else if (sel && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
       // 参考 eSearch：方向键微调选区位置（Shift 10px，Ctrl 调整宽高）
@@ -871,6 +948,7 @@
       shapes = [];
       phase = 'idle';
     } else close();
+    updateCursor(mouse);
     render();
   }
 
@@ -878,98 +956,110 @@
 
   // ---------- 加载一帧 ----------
   async function load(p: Payload) {
+    const meta = parseCaptureMeta(p.meta);
+    if (!meta) {
+      console.error('截图元数据无效');
+      const id: unknown = p.meta?.session_id;
+      if (typeof id === 'string') await ipc.captureFailed(id);
+      return;
+    }
     resetAll();
-    await loadActions();
-    payload = p;
-    const f = p.meta!.frame;
-    const m = p.meta!.mode;
-    mode = m === 'color' ? 'color' : m === 'chat' ? 'chat' : m === 'record' ? 'record' : 'capture';
-    recMode = mode === 'record';
-    W = f.width;
-    H = f.height;
-    scale = f.scale || 1;
-    originX = f.x;
-    originY = f.y;
-    windows = (p.meta!.windows ?? []).map(([x, y, w, h]: number[]) => ({ x, y, w, h }));
-    phase = 'idle';
-    sel = null;
-    shapes = [];
-    redoStack = [];
-    tool = null;
-    activeTool = 'rect';
-    toolMenuOpen = false;
-    beautify = false;
-    sizeEdit = false;
-    qrCount = 0;
-    hoverWin = null;
-    if (prevBlobUrl) {
-      URL.revokeObjectURL(prevBlobUrl);
-      prevBlobUrl = '';
-    }
-    const isWin = navigator.userAgent.includes('Windows');
-    const candidateUrls = isWin
-      ? [`http://mbcap.localhost/frame.png?t=${p.meta!.t}`, `mbcap://localhost/frame.png?t=${p.meta!.t}`]
-      : [`mbcap://localhost/frame.png?t=${p.meta!.t}`, `http://mbcap.localhost/frame.png?t=${p.meta!.t}`];
-    let srcUrl = candidateUrls[0];
-    for (const u of candidateUrls) {
-      try {
-        const res = await fetch(u);
-        if (res.ok) {
-          const blob = await res.blob();
-          prevBlobUrl = URL.createObjectURL(blob);
-          srcUrl = prevBlobUrl;
-          break;
-        }
-      } catch {
-        /* 尝试下一个协议地址 */
-      }
-    }
-    const im = new Image();
-    im.crossOrigin = 'anonymous';
-    im.src = srcUrl;
+    const generation = loadGeneration;
+    const id = meta.session_id;
+    sessionId = id;
+    const current = () => loadGeneration === generation && sessionId === id;
+    const abort = new AbortController();
+    frameAbort = abort;
     try {
+      await loadActions();
+      if (!current()) return;
+      payload = p;
+      const f = meta.frame;
+      mode = meta.mode;
+      recMode = mode === 'record';
+      W = f.width;
+      H = f.height;
+      scale = f.scale;
+      originX = f.x;
+      originY = f.y;
+      windows = meta.windows.map(([x, y, w, h]) => ({ x, y, w, h }));
+      mouse = { ...meta.cursor };
+      const path = `localhost/frame.png?t=${encodeURIComponent(id)}`;
+      const candidates = navigator.userAgent.includes('Windows')
+        ? [`http://mbcap.${path}`, `mbcap://${path}`]
+        : [`mbcap://${path}`, `http://mbcap.${path}`];
+      let frameBlob: Blob | null = null;
+      for (const url of candidates) {
+        try {
+          const response = await fetch(url, { signal: abort.signal, cache: 'no-store' });
+          if (!current()) return;
+          if (!response.ok) continue;
+          const blob = await response.blob();
+          if (!current()) return;
+          if (blob.size > 0) { frameBlob = blob; break; }
+        } catch {
+          if (!current() || abort.signal.aborted) return;
+        }
+      }
+      if (!frameBlob) throw new Error('无法读取本次截图帧');
+      const blobUrl = URL.createObjectURL(frameBlob);
+      prevBlobUrl = blobUrl;
+      const im = new Image();
+      im.src = blobUrl;
       await im.decode();
-    } catch {
-      /* 即使解码异常也继续显示窗口，避免死锁 */
-    }
-    img = im;
-    await tick();
-    if (base && overlay) {
+      if (!current()) return;
+      if (im.naturalWidth !== W || im.naturalHeight !== H) throw new Error('截图帧尺寸不匹配');
+      img = im;
+      await tick();
+      if (!current()) return;
+      if (!base || !overlay) throw new Error('截图画布尚未创建');
       base.width = overlay.width = W;
       base.height = overlay.height = H;
-      const bctx = base.getContext('2d')!;
+      const bctx = base.getContext('2d', { willReadFrequently: true });
+      if (!bctx) throw new Error('截图画布不可用');
       bctx.drawImage(im, 0, 0);
-      try {
-        pixels = bctx.getImageData(0, 0, W, H);
-      } catch {
-        pixels = null;
-      }
-      // 同步绘制首帧并立即通知后端显示窗口（严禁放在 requestAnimationFrame 内，因为隐藏窗口下 WebView2 会挂起 rAF）
+      pixels = bctx.getImageData(0, 0, W, H);
+      updateCursor(mouse);
+      // 隐藏窗口会暂停 rAF，首帧必须同步画完之后再显示。
       drawNow();
+      await ipc.captureReady(id);
+    } catch (error: unknown) {
+      if (!current()) return;
+      console.error('截图帧加载失败', error);
+      resetAll();
+      await ipc.captureFailed(id);
+    } finally {
+      if (frameAbort === abort) frameAbort = null;
     }
-    await ipc.captureReady();
   }
 
   onMount(() => {
+    isWindows = navigator.userAgent.includes('Windows');
+    try { softwareCursor = isWindows && localStorage.getItem(CURSOR_STORAGE_KEY) === '1'; } catch { /* 使用系统光标 */ }
     const un = onPayload(load);
     let unReset: (() => void) | undefined;
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('minibot://capture-reset', () => resetAll()).then((fn) => {
-        unReset = fn;
+    let disposed = false;
+    import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const stop = await listen<unknown>('minibot://capture-reset', (event) => {
+        if (matchesCaptureReset(sessionId, event.payload)) resetAll();
       });
+      if (disposed) stop();
+      else unReset = stop;
     });
-    const onWindowBlur = () => {
-      if (phase === 'selecting' || phase === 'moving' || phase === 'resizing' || phase === 'drawing') {
-        phase = sel ? 'selected' : 'idle';
-        drawing = null;
-        render();
-      }
-    };
+    const onWindowBlur = () => stopInteraction();
+    const onVisibility = () => { if (document.hidden) stopInteraction(); };
+    const onResize = () => render();
     window.addEventListener('blur', onWindowBlur);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      disposed = true;
+      resetAll();
       un.then((f) => f());
-      if (unReset) unReset();
+      unReset?.();
       window.removeEventListener('blur', onWindowBlur);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   });
 
@@ -1057,6 +1147,17 @@
 {/snippet}
 
 <div class="root">
+  {#if isWindows}
+    <button class="cursor-toggle" class:enabled={softwareCursor} aria-pressed={softwareCursor} onclick={toggleSoftwareCursor} title="鼠标指针不跟手时开启软件光标，快捷键 F8">
+      {softwareCursor ? '软件光标已开启 · F8' : '光标异常？按 F8'}
+    </button>
+  {/if}
+  <div class="software-cursor" bind:this={softwareCursorElement} aria-hidden="true">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <path d="M10 1v18M1 10h18" stroke="#111" stroke-width="3" />
+      <path d="M10 1v18M1 10h18" stroke="white" stroke-width="1" />
+    </svg>
+  </div>
   <canvas class="layer" bind:this={base}></canvas>
   <canvas
     class="layer"
@@ -1065,6 +1166,8 @@
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
     onpointercancel={onPointerCancel}
+    onlostpointercapture={onLostPointerCapture}
+    onpointerleave={hideSoftwareCursor}
     ondblclick={() => sel && !tool && act(mode === 'chat' ? 'attach_chat' : 'copy')}
     oncontextmenu={onContext}
   ></canvas>
@@ -1457,6 +1560,26 @@
 </div>
 
 <style>
+  .software-cursor {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 20px;
+    height: 20px;
+    z-index: 10000;
+    pointer-events: none;
+    visibility: hidden;
+  }
+  .cursor-toggle {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 100;
+    background: rgba(18, 18, 21, 0.9);
+    color: white;
+    font-size: 12px;
+  }
+  .cursor-toggle.enabled { border-color: #60a5fa; }
   .root {
     position: fixed;
     inset: 0;

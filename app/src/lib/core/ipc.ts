@@ -545,8 +545,9 @@ export const ipc = {
   engineCancelDownload: () => invoke<void>('engine_cancel_download'),
   gpuSnapshot: () => invoke<GpuSnapshot>('gpu_snapshot'),
 
-  captureReady: () => invoke<void>('capture_ready'),
-  captureClose: () => invoke<void>('capture_close'),
+  captureReady: (sessionId: string) => invoke<void>('capture_ready', { sessionId }),
+  captureClose: (sessionId: string) => invoke<void>('capture_close', { sessionId }),
+  captureFailed: (sessionId: string) => invoke<void>('capture_failed', { sessionId }),
   sendToChat: (image: string, autoSend = true) => invoke<void>('send_to_chat', { image, autoSend }),
   webSearch: (query: string, maxResults = 5) => invoke<SearchResponse>('web_search', { query, maxResults }),
   copyText: (text: string) => invoke<void>('copy_text', { text }),
@@ -660,13 +661,23 @@ export const ipc = {
 };
 
 /** 订阅本窗口的 Payload 投递：挂载时取一次，之后每次投递再取 */
-export async function onPayload(cb: (p: Payload) => void): Promise<() => void> {
-  const first = await ipc.takePayload();
-  if (first) cb(first);
-  return listen('minibot://payload', async () => {
-    const p = await ipc.takePayload();
-    if (p) cb(p);
-  });
+export async function onPayload(cb: (p: Payload) => void | Promise<void>): Promise<() => void> {
+  let disposed = false;
+  const receive = async () => {
+    try {
+      const p = await ipc.takePayload();
+      if (p && !disposed) await cb(p);
+    } catch (error: unknown) {
+      console.error('读取窗口负载失败', error);
+    }
+  };
+  // 先监听，再读取：消除首次读取与订阅之间投递截图时的丢事件窗口。
+  const unlisten = await listen('minibot://payload', () => { void receive(); });
+  void receive();
+  return () => {
+    disposed = true;
+    unlisten();
+  };
 }
 
 export function onLlmStatus(cb: (s: StatusInfo) => void) {

@@ -354,13 +354,18 @@ pub fn gpu_snapshot() -> crate::gpu::GpuSnapshot {
 // ---------- 截图 / 图片 ----------
 
 #[tauri::command]
-pub fn capture_ready(app: AppHandle) {
-    crate::capture::ready(&app);
+pub fn capture_ready(app: AppHandle, session_id: String) {
+    crate::capture::ready(&app, &session_id);
 }
 
 #[tauri::command]
-pub fn capture_close(app: AppHandle) {
-    crate::capture::close(&app);
+pub fn capture_failed(app: AppHandle, session_id: String) {
+    crate::capture::fail(&app, &session_id, "前端无法加载截图帧，请重试");
+}
+
+#[tauri::command]
+pub fn capture_close(app: AppHandle, session_id: String) {
+    crate::capture::close_session(&app, &session_id);
 }
 
 #[tauri::command]

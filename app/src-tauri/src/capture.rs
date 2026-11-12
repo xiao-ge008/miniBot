@@ -1,4 +1,4 @@
-//! 截图：抓取光标所在显示器 → 显示预创建的全屏遮罩窗口
+//! 截图：捕获当前显示器，再由已解码的前端帧驱动遮罩显示。
 use crate::payload::{Origin, Payload, PayloadKind};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -12,172 +12,266 @@ pub struct Frame {
     pub scale: f32,
 }
 
-/// mode: "capture"（截图）| "color"（只取色）
+/// mode: capture（截图）、color（取色）、chat（聊天附图）、record（录屏选区）。
 pub fn start(app: &AppHandle, mode: &str) {
+    let id = crate::payload::new_id();
+    // 在派生线程前占用会话，覆盖抓图及前端解码期间的重复热键。
+    if !app
+        .state::<crate::AppState>()
+        .capture_session
+        .lock()
+        .unwrap()
+        .begin(&id)
+    {
+        return;
+    }
     let app = app.clone();
-    let mode = mode.to_string();
+    let mode = mode.to_owned();
     std::thread::spawn(move || {
-        let st = app.state::<crate::AppState>();
         #[cfg(target_os = "macos")]
-        if st.capture_png.lock().unwrap().is_some() {
+        if !crate::winutil::check_screen_capture_permission() {
+            fail(&app, &id, "缺少屏幕录制权限，已取消截图");
+            let _ = app.run_on_main_thread(|| {
+                if !crate::winutil::request_screen_capture_permission() {
+                    crate::winutil::show_screen_capture_permission_help();
+                }
+            });
             return;
         }
-        #[cfg(not(target_os = "macos"))]
-        if app.get_webview_window("capture").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false) {
-            return;
-        }
+
         let hwnd = crate::winutil::foreground_hwnd();
         let src = crate::winutil::foreground_process();
         let (cx, cy) = crate::winutil::cursor_pos();
-        let mon = xcap::Monitor::from_point(cx, cy)
-            .ok()
-            .or_else(|| xcap::Monitor::all().ok().and_then(|v| v.into_iter().next()));
-        let Some(mon) = mon else {
-            crate::log_msg(&app, format!("[capture] 获取显示器失败 ({cx}, {cy})"));
-            return;
-        };
-        let Ok(img) = mon.capture_image() else {
-            #[cfg(target_os = "macos")]
-            {
-                let has_perm = crate::winutil::check_screen_capture_permission();
-                crate::log_msg(&app, format!("[capture] capture_image 失败，macOS 屏幕捕获权限状态: {has_perm}"));
-                if !has_perm {
-                    let _ = crate::winutil::request_screen_capture_permission();
-                }
+        // 不静默回退到第一块屏幕，否则外接显示器可能只截到另一块屏幕的壁纸。
+        let mon = match xcap::Monitor::from_point(cx, cy) {
+            Ok(mon) => mon,
+            Err(e) => {
+                fail(
+                    &app,
+                    &id,
+                    &format!("无法确定光标所在显示器 ({cx}, {cy}): {e}"),
+                );
+                return;
             }
-            #[cfg(not(target_os = "macos"))]
-            crate::log_msg(&app, "[capture] capture_image 失败");
-            return;
+        };
+        let img = match mon.capture_image() {
+            Ok(img) if img.width() > 0 && img.height() > 0 => img,
+            Ok(_) => {
+                fail(&app, &id, "屏幕捕获返回空图像");
+                return;
+            }
+            Err(e) => {
+                fail(&app, &id, &format!("屏幕捕获失败: {e}"));
+                return;
+            }
         };
         let frame = Frame {
             x: mon.x().unwrap_or(0),
             y: mon.y().unwrap_or(0),
             width: img.width(),
             height: img.height(),
-            scale: mon.scale_factor().unwrap_or(1.0),
+            scale: mon.scale_factor().unwrap_or(1.0).max(1.0),
         };
         let png = crate::imgutil::encode_png(&img);
-        *st.capture_png.lock().unwrap() = Some(png);
         let windows = window_rects(&frame);
-
+        // Windows 为物理像素；macOS 的全局光标、显示器原点均为逻辑点。
+        let cursor_scale = if cfg!(target_os = "macos") {
+            frame.scale
+        } else {
+            1.0
+        };
         let mut p = Payload::text(String::new(), Origin::Capture, src, hwnd);
         p.kind = PayloadKind::Image;
-        p.meta = serde_json::json!({ "mode": mode, "frame": frame, "windows": windows, "t": crate::payload::new_id() });
-
-        #[cfg(target_os = "macos")]
-        {
-            let app_main = app.clone();
-            let frame_c = frame.clone();
-            let mode_c = mode.clone();
-            let _ = app.run_on_main_thread(move || {
-                let Some(w) = crate::wins::get_or_build(&app_main, "capture") else {
-                    crate::log_msg(&app_main, "[capture] get_or_build capture 失败");
-                    return;
-                };
-                let s = frame_c.scale.max(1.0) as f64;
-                let _ = w.set_position(tauri::LogicalPosition::new(frame_c.x as f64, frame_c.y as f64));
-                let _ = w.set_size(tauri::LogicalSize::new(frame_c.width as f64 / s, frame_c.height as f64 / s));
-                crate::wins::deliver(&app_main, "capture", p);
-                crate::log_msg(&app_main, format!("[capture] 已投递截图帧 {}x{} mode={mode_c}", frame_c.width, frame_c.height));
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let Some(w) = crate::wins::get_or_build(&app, "capture") else {
-                crate::log_msg(&app, "[capture] get_or_build capture 失败");
-                return;
-            };
-            let _ = w.set_position(tauri::PhysicalPosition::new(frame.x, frame.y));
-            let _ = w.set_size(tauri::PhysicalSize::new(frame.width, frame.height));
-            crate::wins::deliver(&app, "capture", p);
-            crate::log_msg(&app, format!("[capture] 已投递截图帧 {}x{} mode={mode}", frame.width, frame.height));
-        }
-
-        // 容灾兜底：前端解码绘制完会立即主动调用 capture_ready 显示窗口；此处 2500ms 超时仅作为防死锁极端兜底，杜绝过早显示旧帧
-        let app_show = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(2500));
-            if app_show.state::<crate::AppState>().capture_png.lock().unwrap().is_some() {
-                ready(&app_show);
-            }
+        p.meta = serde_json::json!({
+            "mode": mode, "frame": frame, "windows": windows, "t": id,
+            "session_id": id,
+            "cursor": { "x": (cx - frame.x) as f32 * cursor_scale, "y": (cy - frame.y) as f32 * cursor_scale }
         });
 
-        // 截图时顺手预热模型（显卡忙则静默放弃）
-        if mode == "capture" || mode == "chat" {
-            let app3 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let st = app3.state::<crate::AppState>();
-                st.llm.prewarm(&app3).await;
-            });
+        // Windows WebView2 建窗不能发生在主线程回调中；正常情况下复用预创建窗口。
+        #[cfg(not(target_os = "macos"))]
+        let window = match crate::wins::get_or_build(&app, "capture") {
+            Some(w) => w,
+            None => {
+                fail(&app, &id, "创建截图窗口失败");
+                return;
+            }
+        };
+        let main_app = app.clone();
+        let main_id = id.clone();
+        if let Err(e) = app.run_on_main_thread(move || {
+            if !main_app
+                .state::<crate::AppState>()
+                .capture_session
+                .lock()
+                .unwrap()
+                .is_active(&main_id)
+            {
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            let window = match crate::wins::get_or_build(&main_app, "capture") {
+                Some(w) => w,
+                None => {
+                    close_now(&main_app, &main_id, Some("创建截图窗口失败"));
+                    return;
+                }
+            };
+            let geometry = (|| -> tauri::Result<()> {
+                #[cfg(target_os = "macos")]
+                {
+                    let s = frame.scale as f64;
+                    window.set_position(tauri::LogicalPosition::new(
+                        frame.x as f64,
+                        frame.y as f64,
+                    ))?;
+                    window.set_size(tauri::LogicalSize::new(
+                        frame.width as f64 / s,
+                        frame.height as f64 / s,
+                    ))?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    window.set_position(tauri::PhysicalPosition::new(frame.x, frame.y))?;
+                    window.set_size(tauri::PhysicalSize::new(frame.width, frame.height))?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = geometry {
+                close_now(
+                    &main_app,
+                    &main_id,
+                    Some(&format!("设置截图窗口位置失败: {e}")),
+                );
+                return;
+            }
+            let st = main_app.state::<crate::AppState>();
+            let mut session = st.capture_session.lock().unwrap();
+            if !session.prepare(&main_id) {
+                return;
+            }
+            *st.capture_png.lock().unwrap() = Some(png);
+            drop(session);
+            crate::wins::deliver(&main_app, "capture", p);
+            crate::log_msg(
+                &main_app,
+                format!(
+                    "[capture] session={main_id} frame={}x{} origin=({}, {}) scale={} mode={mode}",
+                    frame.width, frame.height, frame.x, frame.y, frame.scale
+                ),
+            );
+        }) {
+            fail(&app, &id, &format!("调度截图窗口失败: {e}"));
+            return;
         }
+
+        // 超时只取消仍未就绪的当前会话，不强行显示空白/旧帧，更不重复抢焦点。
+        let timeout_app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            let check_app = timeout_app.clone();
+            let _ = timeout_app.run_on_main_thread(move || {
+                if check_app
+                    .state::<crate::AppState>()
+                    .capture_session
+                    .lock()
+                    .unwrap()
+                    .is_preparing(&id)
+                {
+                    close_now(&check_app, &id, Some("截图帧加载超时，已取消，请重试"));
+                }
+            });
+        });
+        // 纯截图阶段不加载模型，避免与 WebView2/系统合成器争用 GPU 和内存。
+        // 实际识图请求仍会通过 LlmManager::ensure_ready 按需启动。
     });
 }
 
-/// 可见窗口矩形（相对当前显示器的物理像素，按 Z 序从上到下），用于「单击选窗口」
 fn window_rects(f: &Frame) -> Vec<[i32; 4]> {
-    // macOS 下跳过全量窗口枚举（避免高频调用 CGWindowListCopyWindowInfo 阻塞 WindowServer）
-    #[cfg(target_os = "macos")]
-    {
-        let _ = f;
-        vec![]
-    }
-    // Windows 下使用原生 Win32 枚举，耗时 1~3ms（避免 xcap::Window::all() 跨进程遍历导致数百毫秒卡顿）
     #[cfg(windows)]
     {
         crate::winutil::fast_window_rects(f.x, f.y, f.width, f.height)
     }
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    #[cfg(not(windows))]
     {
         let _ = f;
         vec![]
     }
 }
 
-pub fn ready(app: &AppHandle) {
-    #[cfg(target_os = "macos")]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(w) = app2.get_webview_window("capture") {
-                let _ = w.show();
-                let _ = w.set_always_on_top(true);
-                let _ = w.set_focus();
-            }
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(w) = app2.get_webview_window("capture") {
-                let _ = w.show();
-                let _ = w.set_always_on_top(true);
-                let _ = w.set_focus();
-                crate::winutil::focus_hwnd(crate::wins::hwnd_of(&w));
-            }
-        });
+pub fn ready(app: &AppHandle, id: &str) {
+    let main_app = app.clone();
+    let id = id.to_owned();
+    let _ = app.run_on_main_thread(move || {
+        let st = main_app.state::<crate::AppState>();
+        if !st.capture_session.lock().unwrap().show(&id) {
+            return;
+        }
+        let Some(w) = main_app.get_webview_window("capture") else {
+            close_now(&main_app, &id, Some("截图窗口已丢失"));
+            return;
+        };
+        let result = (|| -> tauri::Result<()> {
+            w.set_always_on_top(true)?;
+            w.show()?;
+            w.set_focus()?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            close_now(&main_app, &id, Some(&format!("显示截图窗口失败: {e}")));
+        } else {
+            crate::log_msg(&main_app, format!("[capture] session={id} visible"));
+        }
+    });
+}
+
+pub fn fail(app: &AppHandle, id: &str, message: &str) {
+    finish(app, id, Some(message.to_owned()));
+}
+
+pub fn close_session(app: &AppHandle, id: &str) {
+    finish(app, id, None);
+}
+
+/// Rust 内部动作关闭调用时的会话，异步执行时也不能误关下一轮截图。
+pub fn close(app: &AppHandle) {
+    let id = app
+        .state::<crate::AppState>()
+        .capture_session
+        .lock()
+        .unwrap()
+        .current_id();
+    if let Some(id) = id {
+        close_session(app, &id);
     }
 }
 
-pub fn close(app: &AppHandle) {
-    *app.state::<crate::AppState>().capture_png.lock().unwrap() = None;
-    let _ = app.emit_to("capture", "minibot://capture-reset", ());
-    #[cfg(target_os = "macos")]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(w) = app2.get_webview_window("capture") {
-                let _ = w.hide();
-            }
-        });
+fn finish(app: &AppHandle, id: &str, error: Option<String>) {
+    let main_app = app.clone();
+    let id = id.to_owned();
+    let _ = app.run_on_main_thread(move || close_now(&main_app, &id, error.as_deref()));
+}
+
+/// 仅在主线程清理窗口、帧和负载，避免旧清理任务覆盖新会话。
+fn close_now(app: &AppHandle, id: &str, error: Option<&str>) {
+    let st = app.state::<crate::AppState>();
+    let mut session = st.capture_session.lock().unwrap();
+    if !session.close(id) {
+        return;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(w) = app2.get_webview_window("capture") {
-                let _ = w.hide();
-            }
-        });
+    *st.capture_png.lock().unwrap() = None;
+    st.pending.lock().unwrap().remove("capture");
+    // 保持会话锁直到窗口隐藏，防止新热键在清理中途进入。
+    if let Some(w) = app.get_webview_window("capture") {
+        let _ = w.hide();
+    }
+    let _ = app.emit_to(
+        "capture",
+        "minibot://capture-reset",
+        serde_json::json!({ "session_id": id }),
+    );
+    drop(session);
+    if let Some(error) = error {
+        crate::log_msg(app, format!("[capture] session={id} error={error}"));
     }
 }

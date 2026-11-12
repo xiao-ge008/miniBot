@@ -699,6 +699,45 @@ mod imp {
 
     pub fn minimize_hwnd(_hwnd: isize) {}
 
+    /// 只在主线程设置截图窗口的 Space 行为，不使用系统原生全屏切换。
+    pub fn configure_capture_window(ns_win_ptr: isize) {
+        if ns_win_ptr == 0 { return; }
+        with_autorelease_pool(|| unsafe {
+            let window = ns_win_ptr as *mut c_void;
+            let old = msg_send_isize(window, sel_registerName(c"collectionBehavior".as_ptr())) as usize;
+            let set: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) =
+                std::mem::transmute(objc_msgSend as *const ());
+            // CanJoinAllSpaces + FullScreenAuxiliary，移除互斥的 MoveToActiveSpace/Primary/None。
+            let behavior = (old & !((1 << 1) | (1 << 7) | (1 << 9))) | (1 << 0) | (1 << 8);
+            set(window, sel_registerName(c"setCollectionBehavior:".as_ptr()), behavior);
+        });
+    }
+
+    /// 权限被拒绝时显示明确说明，不把仅有壁纸的图像当作成功截图。
+    pub fn show_screen_capture_permission_help() {
+        with_autorelease_pool(|| unsafe {
+            let string = |text: &std::ffi::CStr| {
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+                    std::mem::transmute(objc_msgSend as *const ());
+                f(objc_getClass(c"NSString".as_ptr()), sel_registerName(c"stringWithUTF8String:".as_ptr()), text.as_ptr())
+            };
+            let alert = msg_send_id(objc_getClass(c"NSAlert".as_ptr()), sel_registerName(c"alloc".as_ptr()));
+            let alert = msg_send_id(alert, sel_registerName(c"init".as_ptr()));
+            if alert.is_null() { return; }
+            let set: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+                std::mem::transmute(objc_msgSend as *const ());
+            set(alert, sel_registerName(c"setMessageText:".as_ptr()), string(c"miniBot 需要屏幕录制权限"));
+            set(alert, sel_registerName(c"setInformativeText:".as_ptr()), string(c"请在系统设置 → 隐私与安全性 → 屏幕录制（或屏幕与系统音频录制）中允许 miniBot。授权后请完全退出并重新打开 miniBot，再尝试截图。"));
+            let add: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            let _ = add(alert, sel_registerName(c"addButtonWithTitle:".as_ptr()), string(c"知道了"));
+            let _ = msg_send_isize(alert, sel_registerName(c"runModal".as_ptr()));
+            let release: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+                std::mem::transmute(objc_msgSend as *const ());
+            release(alert, sel_registerName(c"release".as_ptr()));
+        });
+    }
+
     pub fn set_exclude_from_capture(ns_win_ptr: isize, exclude: bool) {
         if ns_win_ptr == 0 {
             return;

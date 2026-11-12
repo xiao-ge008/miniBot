@@ -1,6 +1,7 @@
 //! miniBot 主入口：托盘常驻的桌面 AI 小工具
 mod actions;
 mod capture;
+mod capture_session;
 mod clip;
 mod commands;
 mod engine;
@@ -53,6 +54,7 @@ pub struct AppState {
     pub clip: clip::ClipWatcher,
     pub pending: Mutex<HashMap<String, payload::Payload>>,
     pub capture_png: Mutex<Option<Vec<u8>>>,
+    pub capture_session: Mutex<capture_session::CaptureLifecycle>,
     pub history: Option<history::History>,
     pub gateway_error: Mutex<Option<String>>,
     pub hotkey_map: Mutex<HashMap<u32, String>>,
@@ -112,10 +114,17 @@ pub fn run() {
         ))
         .plugin(hotkeys::plugin())
         // 截图帧通过自定义协议传给前端，避免大图 base64 走 IPC
-        .register_uri_scheme_protocol("mbcap", |ctx, _req| {
+        .register_uri_scheme_protocol("mbcap", |ctx, req| {
             let st = ctx.app_handle().state::<AppState>();
-            let data = st.capture_png.lock().unwrap().clone().unwrap_or_default();
+            // 旧请求不能读到下一次截图，避免异步解码串帧。
+            let requested = req.uri().query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("t=")));
+            let session = st.capture_session.lock().unwrap();
+            let valid = requested.is_some_and(|id| session.is_active(id));
+            let data = if valid { st.capture_png.lock().unwrap().clone() } else { None };
+            let status = if data.is_some() { 200 } else { 410 };
+            let data = data.unwrap_or_default();
             tauri::http::Response::builder()
+                .status(status)
                 .header("content-type", "image/png")
                 .header("access-control-allow-origin", "*")
                 .header("cache-control", "no-store")
@@ -135,6 +144,7 @@ pub fn run() {
                 clip: clip::ClipWatcher::default(),
                 pending: Mutex::new(HashMap::new()),
                 capture_png: Mutex::new(None),
+                capture_session: Mutex::new(capture_session::CaptureLifecycle::default()),
                 history,
                 gateway_error: Mutex::new(None),
                 hotkey_map: Mutex::new(HashMap::new()),
@@ -229,6 +239,7 @@ pub fn run() {
             commands::engine_cancel_download,
             commands::gpu_snapshot,
             commands::capture_ready,
+            commands::capture_failed,
             commands::capture_close,
             commands::send_to_chat,
             commands::web_search,

@@ -172,12 +172,25 @@ fn build_capture(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .title("miniBot 截图")
         .decorations(false)
         .shadow(false)
-        .resizable(cfg!(target_os = "macos"))
+        .resizable(false)
         .always_on_top(true)
+        .visible_on_all_workspaces(cfg!(target_os = "macos"))
         .skip_taskbar(true)
+        .focused(false)
         .visible(false)
         .build()?;
-    prevent_destroy_on_close(&w);
+    #[cfg(target_os = "macos")]
+    if let Ok(ptr) = w.ns_window() {
+        crate::winutil::configure_capture_window(ptr as isize);
+    }
+    let handle = app.clone();
+    w.on_window_event(move |evt| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = evt {
+            api.prevent_close();
+            // Alt+F4/系统关闭也必须清理会话，不能只隐藏后永远拒绝新截图。
+            crate::capture::close(&handle);
+        }
+    });
     Ok(w)
 }
 

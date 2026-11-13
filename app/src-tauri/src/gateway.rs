@@ -69,6 +69,10 @@ pub fn spawn(app: AppHandle) {
             .route("/v1/ocr", post(ocr))
             .route("/v1/qr/decode", post(qr_decode))
             .route("/v1/qr/encode", post(qr_encode))
+            .route("/v1/clip/suppress", post(clip_suppress))
+            .route("/v1/kb/web", post(kb_save_web))
+            .route("/v1/kb/image", post(kb_save_image))
+            .route("/v1/kb/clip", post(kb_save_clip))
             .fallback(fallback)
             .layer(axum::middleware::map_response(cors))
             .with_state(gw);
@@ -288,5 +292,83 @@ async fn qr_encode(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Va
     match crate::qr::encode_svg(&s("text", ""), &s("ec", "M"), &s("dark", "#000000"), &s("light", "#ffffff")) {
         Ok(svg) => Json(json!({ "svg": svg })).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, "qr_error", &e.to_string(), Value::Null),
+    }
+}
+
+async fn clip_suppress(State(gw): State<Gw>, Json(body): Json<Value>) -> Response {
+    let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1200);
+    let st = gw.app.state::<crate::AppState>();
+    st.clip.suppress(ms);
+    Json(json!({ "ok": true, "suppressed_ms": ms })).into_response()
+}
+
+async fn kb_save_web(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if let Err(r) = check_auth(&gw, &headers) {
+        return r;
+    }
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if url.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "invalid_request", "url 不能为空", Value::Null);
+    }
+    let title = body.get("title").and_then(|v| v.as_str());
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let summary = body.get("summary").and_then(|v| v.as_str());
+
+    match crate::kb::save_web(&gw.app, url, title, content, summary).await {
+        Ok(path) => Json(json!({ "ok": true, "path": path.to_string_lossy() })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "kb_error", &e, Value::Null),
+    }
+}
+
+async fn kb_save_image(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if let Err(r) = check_auth(&gw, &headers) {
+        return r;
+    }
+    let b64 = body.get("image_base64").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let image_url = body.get("image_url").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let source = body.get("source").and_then(|v| v.as_str());
+
+    let final_b64 = if !b64.is_empty() {
+        b64.to_string()
+    } else if !image_url.is_empty() {
+        let client = reqwest::Client::builder().build().unwrap_or_default();
+        let mut req = client.get(image_url);
+        if let Some(src) = source {
+            req = req.header("Referer", src);
+        }
+        match req.send().await {
+            Ok(resp) => {
+                if let Ok(bytes) = resp.bytes().await {
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                } else {
+                    return err(StatusCode::BAD_GATEWAY, "download_error", "下载图片内容失败", Value::Null);
+                }
+            }
+            Err(e) => return err(StatusCode::BAD_GATEWAY, "download_error", &e.to_string(), Value::Null),
+        }
+    } else {
+        return err(StatusCode::BAD_REQUEST, "invalid_request", "需提供 image_base64 或 image_url", Value::Null);
+    };
+
+    match crate::kb::save_image(&gw.app, &final_b64, None, None, source).await {
+        Ok(path) => Json(json!({ "ok": true, "path": path.to_string_lossy() })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "kb_error", &e, Value::Null),
+    }
+}
+
+async fn kb_save_clip(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if let Err(r) = check_auth(&gw, &headers) {
+        return r;
+    }
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if text.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "invalid_request", "text 不能为空", Value::Null);
+    }
+    let url = body.get("url").and_then(|v| v.as_str());
+    let summary = body.get("summary").and_then(|v| v.as_str());
+
+    match crate::kb::save_clip(&gw.app, text, Some("browser_extension"), url, summary).await {
+        Ok(path) => Json(json!({ "ok": true, "path": path.to_string_lossy() })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "kb_error", &e, Value::Null),
     }
 }

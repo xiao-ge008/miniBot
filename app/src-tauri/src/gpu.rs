@@ -3,7 +3,19 @@ use nvml_wrapper::{enums::device::UsedGpuMemory, Nvml};
 use serde::Serialize;
 use std::sync::OnceLock;
 
-/// 显存已用达到或超过 15GB（15360 MB）时自动释放模型让道
+/// 计算动态让道阈值（MB）：
+/// - 若显卡总显存 <= 16GB，阈值为 15GB（留 1GB 给系统/桌面）；
+/// - 若显卡为 24GB / 32GB / 48GB 大显卡（用户运行 27B 等大模型正常需要 16GB~20GB 显存），
+///   动态放宽至 total_mb - 1536MB，避免 27B 大模型在生成过程中因达到 15GB 被自身监控强杀截断。
+pub fn yield_threshold_mb(total_mb: u64) -> u64 {
+    if total_mb <= 16384 {
+        15 * 1024
+    } else {
+        total_mb.saturating_sub(1536).max(15 * 1024)
+    }
+}
+
+#[allow(dead_code)]
 pub const YIELD_USED_MB: u64 = 15 * 1024;
 
 static NVML: OnceLock<Option<Nvml>> = OnceLock::new();

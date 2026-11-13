@@ -310,7 +310,8 @@ impl LlmManager {
 
         if !force {
             let snap = gpu::snapshot();
-            if snap.available && (snap.used_mb >= gpu::YIELD_USED_MB || snap.free_mb < cfg.required_vram_mb) {
+            let limit = gpu::yield_threshold_mb(snap.total_mb);
+            if snap.available && (snap.used_mb >= limit || snap.free_mb < cfg.required_vram_mb) {
                 return Err(LlmError::GpuBusy { snapshot: snap, required_mb: cfg.required_vram_mb });
             }
         }
@@ -502,11 +503,12 @@ impl LlmManager {
                     mgr.set_status(&app, Status::Released, "进程已退出");
                     continue;
                 }
-                // 优先检测显存是否超过 15GB：即使正在使用中（active > 0）也立即中断并释放模型让道
+                // 检测显存是否达到显卡极限让道阈值（动态适配大显卡，避免 27B 正常占用 16G+ 时被误杀）
                 let snap = gpu::snapshot();
-                if snap.available && snap.used_mb >= gpu::YIELD_USED_MB {
+                let limit = gpu::yield_threshold_mb(snap.total_mb);
+                if snap.available && snap.used_mb >= limit {
                     *mgr.yielded_snapshot.lock().unwrap() = Some(snap);
-                    mgr.release(&app, Status::Yielded, "显存占用超过 15GB，已自动释放模型").await;
+                    mgr.release(&app, Status::Yielded, &format!("显存占用达到 {limit}MB 上限，已自动释放模型让道")).await;
                     continue;
                 }
                 let idle = mgr.last_used.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);

@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tauri::{AppHandle, Manager};
 
+pub const ZERO_WIDTH_FINGERPRINT: &str = "\u{200B}\u{200C}\u{200B}";
+
 #[derive(Default)]
 pub struct ClipWatcher {
     /// 用户手动暂停到某个 UNIX 秒
@@ -154,6 +156,17 @@ impl ClipWatcher {
                 // 稍等浏览器/编辑器完成多格式写入，并带重试读取
                 std::thread::sleep(Duration::from_millis(45));
                 if let Some(text) = read_text_retry() {
+                    // 方案 A：检测是否来自网页插件的零宽防冲突指纹
+                    if text.contains(ZERO_WIDTH_FINGERPRINT) {
+                        crate::log_msg(&app, "[clip] 检测到网页插件专属标记，抑制桌面 Tip 并清洗剪贴板".to_string());
+                        let cleaned = text.replace(ZERO_WIDTH_FINGERPRINT, "");
+                        if set_text_retry(cleaned) {
+                            w.mark_self_write();
+                            last_seq = crate::winutil::clipboard_seq();
+                        }
+                        continue;
+                    }
+
                     // 同步最新 seq，避免同一轮多步写入重复触发
                     last_seq = crate::winutil::clipboard_seq();
                     let t = text.trim();

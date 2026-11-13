@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "miniBot 网页助手",
+  "version": "1.0.0",
+  "description": "miniBot 浏览器深度联动插件：网页内容智能提取、AI 总结、图片悬浮采集、划词沉浸式助手与剪贴板协同。",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "clipboardWrite",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:18181/*",
+    "http://localhost:18181/*",
+    "http://127.0.0.1:18089/*",
+    "http://localhost:18089/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["libs/readability.js", "libs/turndown.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "miniBot 助手设置"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

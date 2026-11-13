@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>miniBot 插件设置</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    body {
+      width: 320px;
+      padding: 16px;
+      background: #111827;
+      color: #f3f4f6;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #374151;
+    }
+    .header h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #818cf8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      background: #374151;
+      color: #9ca3af;
+    }
+    .status-badge.online {
+      background: #065f46;
+      color: #34d399;
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid #374151;
+      background: #1f2937;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+    }
+    input[type="text"]:focus {
+      border-color: #6366f1;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      padding: 8px 0;
+      border-top: 1px solid #1f2937;
+    }
+    .btn-save {
+      width: 100%;
+      margin-top: 14px;
+      padding: 8px 0;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-save:hover {
+      background: #4338ca;
+    }
+    .tips {
+      margin-top: 12px;
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>🤖 miniBot 助手</h2>
+    <span id="connStatus" class="status-badge">检测中...</span>
+  </div>
+
+  <div class="form-group">
+    <label for="serverUrl">App 网关地址</label>
+    <input type="text" id="serverUrl" placeholder="http://127.0.0.1:18181" value="http://127.0.0.1:18181">
+  </div>
+
+  <div class="form-group">
+    <label for="apiKey">API Key (若 App 未配置可留空)</label>
+    <input type="text" id="apiKey" placeholder="可选密钥">
+  </div>
+
+  <div class="toggle-row">
+    <span>图片悬停采集图标</span>
+    <input type="checkbox" id="enableHoverImage" checked>
+  </div>
+
+  <div class="toggle-row">
+    <span>网页划词 AI 浮窗</span>
+    <input type="checkbox" id="enableSelectionTip" checked>
+  </div>
+
+  <button class="btn-save" id="btnSave">保存设置</button>
+
+  <div class="tips">
+    💡 提示：在任意网页空白处点击右键，可将整篇网页智能提纯归档至知识库；鼠标滑过大图可直接采集。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

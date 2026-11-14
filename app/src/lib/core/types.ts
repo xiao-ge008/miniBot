@@ -217,6 +217,9 @@ export interface ClipDistillResult {
 
 export interface LayaStatus {
   installed: boolean;
+  model_ready?: boolean;
+  engine_ready?: boolean;
+  needs_redownload?: boolean;
   size_mb: number;
   path: string;
   enabled: boolean;

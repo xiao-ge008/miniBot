@@ -92,7 +92,7 @@ jobs:
 
           echo "==> 1. Cleaning xattr & applying deep Ad-hoc signature to miniBot.app"
           xattr -cr "$APP_PATH"
-          codesign --force --deep --sign - "$APP_PATH"
+          codesign --force --deep --identifier com.minibot.app --sign - "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
           echo "==> 2. Preparing DMG staging folder with Applications link & one-click fixer"
@@ -119,8 +119,10 @@ jobs:
           fi
           echo "-> 正在清除浏览器下载隔离属性 (com.apple.quarantine) ..."
           xattr -cr "/Applications/miniBot.app" 2>/dev/null || sudo xattr -cr "/Applications/miniBot.app"
-          echo "-> 正在刷新 Apple Silicon 本地深度签名 ..."
-          codesign --force --deep --sign - "/Applications/miniBot.app" 2>/dev/null || sudo codesign --force --deep --sign - "/Applications/miniBot.app"
+          if ! codesign --verify --deep --strict "/Applications/miniBot.app" >/dev/null 2>&1; then
+              echo "-> 检测到签名损坏，正在修复本地签名 ..."
+              codesign --force --deep --identifier com.minibot.app --sign - "/Applications/miniBot.app" 2>/dev/null || sudo codesign --force --deep --identifier com.minibot.app --sign - "/Applications/miniBot.app"
+          fi
           echo "✅ 修复完成！正在为您启动 miniBot ..."
           open "/Applications/miniBot.app"
           sleep 1

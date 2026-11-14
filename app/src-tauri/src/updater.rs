@@ -553,7 +553,9 @@ if hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet; then
         rm -rf "/Applications/miniBot.app"
         cp -R "$APP_SRC" "/Applications/miniBot.app"
         xattr -cr "/Applications/miniBot.app" 2>/dev/null || true
-        codesign --force --deep --sign - "/Applications/miniBot.app" 2>/dev/null || true
+        if ! codesign --verify --deep --strict "/Applications/miniBot.app" >/dev/null 2>&1; then
+            codesign --force --deep --identifier com.minibot.app --sign - "/Applications/miniBot.app" 2>/dev/null || true
+        fi
         hdiutil detach "$MNT" -quiet 2>/dev/null || true
         rmdir "$MNT" 2>/dev/null || true
         open -n "/Applications/miniBot.app"

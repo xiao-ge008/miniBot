@@ -28,22 +28,36 @@ pub fn start(app: &AppHandle, mode: &str) {
     let app = app.clone();
     let mode = mode.to_owned();
     std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        if !crate::winutil::check_screen_capture_permission() {
-            fail(&app, &id, "缺少屏幕录制权限，已取消截图");
-            let _ = app.run_on_main_thread(|| {
-                if !crate::winutil::request_screen_capture_permission() {
-                    crate::winutil::show_screen_capture_permission_help();
-                }
-            });
-            return;
-        }
-
         let hwnd = crate::winutil::foreground_hwnd();
         let src = crate::winutil::foreground_process();
         let (cx, cy) = crate::winutil::cursor_pos();
-        // 不静默回退到第一块屏幕，否则外接显示器可能只截到另一块屏幕的壁纸。
-        let mon = match xcap::Monitor::from_point(cx, cy) {
+        // 优先使用光标所在显示器；当光标处于多屏边缘极值像素导致 from_point 失败时，回退到距离最近或主显示器。
+        let mon = match xcap::Monitor::from_point(cx, cy).or_else(|e| {
+            let mons = xcap::Monitor::all()?;
+            mons.into_iter()
+                .min_by_key(|m| {
+                    let mx = m.x().unwrap_or(0);
+                    let my = m.y().unwrap_or(0);
+                    let mw = m.width().unwrap_or(1) as i32;
+                    let mh = m.height().unwrap_or(1) as i32;
+                    let dx = if cx < mx {
+                        mx - cx
+                    } else if cx >= mx + mw {
+                        cx - (mx + mw - 1)
+                    } else {
+                        0
+                    };
+                    let dy = if cy < my {
+                        my - cy
+                    } else if cy >= my + mh {
+                        cy - (my + mh - 1)
+                    } else {
+                        0
+                    };
+                    (dx as i64) * (dx as i64) + (dy as i64) * (dy as i64)
+                })
+                .ok_or(e)
+        }) {
             Ok(mon) => mon,
             Err(e) => {
                 fail(
@@ -57,10 +71,18 @@ pub fn start(app: &AppHandle, mode: &str) {
         let img = match mon.capture_image() {
             Ok(img) if img.width() > 0 && img.height() > 0 => img,
             Ok(_) => {
+                #[cfg(target_os = "macos")]
+                if !crate::winutil::check_screen_capture_permission() {
+                    let _ = crate::winutil::request_screen_capture_permission();
+                }
                 fail(&app, &id, "屏幕捕获返回空图像");
                 return;
             }
             Err(e) => {
+                #[cfg(target_os = "macos")]
+                if !crate::winutil::check_screen_capture_permission() {
+                    let _ = crate::winutil::request_screen_capture_permission();
+                }
                 fail(&app, &id, &format!("屏幕捕获失败: {e}"));
                 return;
             }
@@ -133,7 +155,12 @@ pub fn start(app: &AppHandle, mode: &str) {
                 #[cfg(not(target_os = "macos"))]
                 {
                     window.set_position(tauri::PhysicalPosition::new(frame.x, frame.y))?;
-                    window.set_size(tauri::PhysicalSize::new(frame.width, frame.height))?;
+                    // 高度增加 1 物理像素，防止 Windows 10/11 DWM 将恰好等于屏幕尺寸的 WS_POPUP 窗口
+                    // 提升为独占全屏（DirectFlip / Independent Flip / MPO），避免显卡驱动冻结硬件鼠标光标。
+                    window.set_size(tauri::PhysicalSize::new(
+                        frame.width,
+                        frame.height.saturating_add(1),
+                    ))?;
                 }
                 Ok(())
             })();
@@ -215,6 +242,8 @@ pub fn ready(app: &AppHandle, id: &str) {
             w.set_always_on_top(true)?;
             w.show()?;
             w.set_focus()?;
+            #[cfg(windows)]
+            crate::winutil::prepare_capture_window(crate::wins::hwnd_of(&w));
             Ok(())
         })();
         if let Err(e) = result {

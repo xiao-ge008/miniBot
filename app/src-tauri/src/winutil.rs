@@ -67,6 +67,38 @@ mod imp {
         }
     }
 
+    /// 准备并激活 Windows 截图遮罩窗口：
+    /// 1. 释放全局热键残留的修饰键（如 Alt+Q），防止前序窗口进入菜单模态循环；
+    /// 2. 赋予 WS_EX_TOOLWINDOW 扩展样式，防止 DWM 将全屏无边框窗口提升为独占全屏（DirectFlip/MPO）而冻结硬件鼠标光标；
+    /// 3. 置顶并夺取前台焦点，同时刷新系统光标位置以唤醒被隐藏的鼠标指针。
+    pub fn prepare_capture_window(hwnd: isize) {
+        release_modifiers();
+        if hwnd == 0 {
+            return;
+        }
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, LoadCursorW, SetCursor, SetCursorPos, SetWindowLongPtrW, GWL_EXSTYLE,
+            IDC_CROSS, WS_EX_TOOLWINDOW,
+        };
+        unsafe {
+            let h = HWND(hwnd as *mut _);
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            if (ex & WS_EX_TOOLWINDOW.0 as isize) == 0 {
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW.0 as isize);
+            }
+        }
+        focus_hwnd(hwnd);
+        unsafe {
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() {
+                let _ = SetCursorPos(pt.x, pt.y);
+            }
+            if let Ok(cross) = LoadCursorW(None, IDC_CROSS) {
+                let _ = SetCursor(Some(cross));
+            }
+        }
+    }
+
     /// Windows 原生极速枚举可见顶层应用窗口矩形（微秒级，避免 xcap::Window::all() 卡顿）
     pub fn fast_window_rects(fx: i32, fy: i32, fw: u32, fh: u32) -> Vec<[i32; 4]> {
         use windows::core::BOOL;
@@ -713,6 +745,8 @@ mod imp {
         });
     }
 
+    pub fn prepare_capture_window(_hwnd: isize) {}
+
     /// 权限被拒绝时显示明确说明，不把仅有壁纸的图像当作成功截图。
     pub fn show_screen_capture_permission_help() {
         with_autorelease_pool(|| unsafe {
@@ -774,7 +808,13 @@ mod imp {
         unsafe { CGPreflightScreenCaptureAccess() }
     }
 
+    /// 每次进程生命周期最多触发一次系统原生屏幕录制权限请求，避免重复弹窗骚扰用户
     pub fn request_screen_capture_permission() -> bool {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static REQUESTED: AtomicBool = AtomicBool::new(false);
+        if REQUESTED.swap(true, Ordering::SeqCst) {
+            return unsafe { CGPreflightScreenCaptureAccess() };
+        }
         unsafe { CGRequestScreenCaptureAccess() }
     }
 }
@@ -804,6 +844,8 @@ mod imp {
     }
 
     pub fn focus_hwnd(_hwnd: isize) {}
+
+    pub fn prepare_capture_window(_hwnd: isize) {}
 
     pub fn fast_window_rects(_fx: i32, _fy: i32, _fw: u32, _fh: u32) -> Vec<[i32; 4]> {
         vec![]

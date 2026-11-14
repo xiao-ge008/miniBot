@@ -918,6 +918,23 @@ pub fn search_kb(
     }
 
     hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 阶段 4：若已安装并启用 Laya GGUF 加速模型（laya_multilingual_q8_0.gguf），对候选片段执行神经语义重排
+    let laya_enabled = app
+        .state::<crate::AppState>()
+        .settings
+        .get()
+        .knowledge
+        .laya_enabled;
+    if laya_enabled && hits.len() > 1 {
+        if let Some((scored, ms)) = laya_rerank_hits(raw_query, &mut hits) {
+            crate::log_msg(
+                app,
+                format!("[kb][laya] GGUF 神经语义重排完成: 候选={scored} 耗时={ms}ms"),
+            );
+        }
+    }
+
     hits.truncate(limit.max(12));
 
     let mut context_text = String::new();
@@ -958,38 +975,373 @@ pub fn search_kb(
     })
 }
 
-// ==================== Laya 加速模型管理与下载 ====================
+// ==================== Laya GGUF 加速模型管理、推理守护进程与下载 ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayaStatus {
     pub installed: bool,
+    pub model_ready: bool,
+    pub engine_ready: bool,
+    pub needs_redownload: bool,
     pub size_mb: f64,
     pub path: String,
     pub enabled: bool,
 }
 
+pub fn get_laya_dir() -> PathBuf {
+    crate::settings::default_engine_dir().join("models").join("laya")
+}
+
+/// 校验文件是否为合法的 GGUF 模型文件（文件大小 >= 50MB 且头部魔数为 "GGUF"）
+pub fn is_valid_gguf(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() < 50 * 1024 * 1024 {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    &magic == b"GGUF"
+}
+
+/// 扫描并清理老版本遗留的错误模型文件（如 model.safetensors、半成品 .part 或损坏的非 GGUF 文件）
+/// 返回是否发现并清理了旧版遗留模型
+fn cleanup_legacy_laya_files(dir: &Path) -> bool {
+    let mut found_legacy = false;
+    let legacy_safetensors = dir.join("model.safetensors");
+    if legacy_safetensors.exists() {
+        let _ = std::fs::remove_file(&legacy_safetensors);
+        found_legacy = true;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let fname = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if fname.ends_with(".safetensors") || fname.ends_with(".safetensors.part") {
+                let _ = std::fs::remove_file(&p);
+                found_legacy = true;
+            } else if fname.ends_with(".gguf") && !is_valid_gguf(&p) {
+                let _ = std::fs::remove_file(&p);
+                found_legacy = true;
+            }
+        }
+    }
+    found_legacy
+}
+
 pub fn get_laya_file_path() -> PathBuf {
-    let base = crate::settings::default_engine_dir();
-    base.join("models").join("laya").join("model.safetensors")
+    let dir = get_laya_dir();
+    let preferred = dir.join("laya_multilingual_q8_0.gguf");
+    if is_valid_gguf(&preferred) {
+        return preferred;
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("gguf"))
+                    .unwrap_or(false)
+                && is_valid_gguf(&p)
+            {
+                return p;
+            }
+        }
+    }
+    preferred
+}
+
+pub fn get_laya_bin_path() -> PathBuf {
+    let bin_name = if cfg!(windows) { "laya.exe" } else { "laya" };
+    get_laya_dir().join(bin_name)
+}
+
+struct LayaDaemon {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    model_path: PathBuf,
+}
+
+static LAYA_DAEMON: std::sync::OnceLock<std::sync::Mutex<Option<LayaDaemon>>> =
+    std::sync::OnceLock::new();
+
+fn laya_daemon_slot() -> &'static std::sync::Mutex<Option<LayaDaemon>> {
+    LAYA_DAEMON.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn stop_laya_daemon() {
+    if let Ok(mut guard) = laya_daemon_slot().lock() {
+        if let Some(mut d) = guard.take() {
+            let _ = d.child.kill();
+            let _ = d.child.wait();
+        }
+    }
+}
+
+impl LayaDaemon {
+    fn spawn(bin_path: &Path, model_path: &Path) -> Result<Self, String> {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        let mut cmd = Command::new(bin_path);
+        cmd.args([
+            "daemon",
+            &model_path.to_string_lossy(),
+            "--device",
+            "auto",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("启动 Laya GGUF 引擎失败: {e}"))?;
+        crate::jobobj::attach(child.id());
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "无法打开 Laya stdin".to_string())?;
+        let stdout_raw = child
+            .stdout
+            .take()
+            .ok_or_else(|| "无法打开 Laya stdout".to_string())?;
+        let mut stdout = std::io::BufReader::new(stdout_raw);
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = stdout
+                .read_line(&mut line)
+                .map_err(|e| format!("读取 Laya 就绪状态失败: {e}"))?;
+            if n == 0 {
+                let _ = child.kill();
+                return Err("Laya 守护进程在就绪前退出".to_string());
+            }
+            if line.contains("\"status\"") && line.contains("\"ready\"") {
+                break;
+            }
+        }
+
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+            model_path: model_path.to_path_buf(),
+        })
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn score_relevance(&mut self, query: &str, snippet: &str) -> Option<f64> {
+        use std::io::{BufRead, Write};
+
+        let req = serde_json::json!({
+            "questions": {
+                "q": {
+                    "type": "noul",
+                    "instructions": format!("文档内容是否与问题相关：{query}")
+                }
+            },
+            "state": {
+                "document": snippet
+            }
+        });
+        let mut payload = serde_json::to_string(&req).ok()?;
+        payload.push('\n');
+        self.stdin.write_all(payload.as_bytes()).ok()?;
+        self.stdin.flush().ok()?;
+
+        let mut resp_line = String::new();
+        let n = self.stdout.read_line(&mut resp_line).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let val: serde_json::Value = serde_json::from_str(resp_line.trim()).ok()?;
+        val.get("answers")?
+            .get("q")?
+            .get("noul")?
+            .as_f64()
+    }
+}
+
+/// 使用 Laya GGUF 模型（laya_multilingual_q8_0.gguf）对前 N 条候选片段做神经语义重排
+pub fn laya_rerank_hits(raw_query: &str, hits: &mut [KbSearchHit]) -> Option<(usize, u128)> {
+    let query = raw_query.trim();
+    if query.is_empty() || hits.len() <= 1 {
+        return None;
+    }
+    let model_path = get_laya_file_path();
+    let bin_path = get_laya_bin_path();
+    if !model_path.exists() || !bin_path.exists() {
+        return None;
+    }
+
+    let t0 = std::time::Instant::now();
+    let mut guard = laya_daemon_slot().lock().ok()?;
+    let needs_respawn = match guard.as_mut() {
+        Some(d) => !d.is_alive() || d.model_path != model_path,
+        None => true,
+    };
+    if needs_respawn {
+        if let Some(mut old) = guard.take() {
+            let _ = old.child.kill();
+            let _ = old.child.wait();
+        }
+        match LayaDaemon::spawn(&bin_path, &model_path) {
+            Ok(d) => *guard = Some(d),
+            Err(_) => return None,
+        }
+    }
+
+    let daemon = guard.as_mut()?;
+    let top_n = hits.len().min(8);
+    let mut scored_count = 0usize;
+
+    for hit in hits.iter_mut().take(top_n) {
+        let combined = if hit.heading.is_empty() || hit.heading == "正文" {
+            hit.content.clone()
+        } else {
+            format!("{}：{}", hit.heading, hit.content)
+        };
+        let snippet: String = combined
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect();
+        if snippet.is_empty() {
+            continue;
+        }
+        if let Some(prob) = daemon.score_relevance(query, &snippet) {
+            let p = prob.clamp(0.0, 1.0);
+            // 将 Laya 的 noul 概率映射为显著重排加分（0.001 -> +3.8，0.05 -> +30.8，0.36 -> +100.8，0.95 -> +193.0）
+            let boost = (p.sqrt() * 120.0) + (p * 80.0);
+            hit.score += boost;
+            scored_count += 1;
+        } else {
+            // 若管道异常断开，立即终止本轮重排并清理守护进程，不阻塞主检索结果
+            if let Some(mut broken) = guard.take() {
+                let _ = broken.child.kill();
+            }
+            break;
+        }
+    }
+
+    if scored_count > 0 {
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        Some((scored_count, t0.elapsed().as_millis()))
+    } else {
+        None
+    }
 }
 
 pub fn check_laya_status(app: &AppHandle) -> LayaStatus {
+    let dir = get_laya_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let redownload_marker = dir.join(".needs_gguf_redownload");
+    let auto_marker = dir.join(".gguf_auto_enabled");
+
+    // 1. 扫描并清理老用户遗留的错误模型文件（如 model.safetensors 或非 GGUF 损坏文件）
+    if cleanup_legacy_laya_files(&dir) {
+        let _ = std::fs::write(&redownload_marker, b"1");
+    }
+
+    // 2. 严格校验 GGUF 模型与原生推理执行器是否同时就绪
     let target = get_laya_file_path();
-    let installed = target.exists();
-    let size_bytes = if installed {
+    let model_ready = is_valid_gguf(&target);
+    let engine_ready = get_laya_bin_path().exists();
+    let installed = model_ready && engine_ready;
+
+    let size_bytes = if model_ready {
         std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0)
     } else {
         0
     };
     let size_mb = (size_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
-    let enabled = app.state::<crate::AppState>().settings.get().knowledge.laya_enabled;
+
+    let st = app.state::<crate::AppState>();
+    let mut s = st.settings.get();
+
+    if installed {
+        // 模型与推理引擎均已就绪：清除老用户重下标记，并在首次识别时自动开启加速
+        if redownload_marker.exists() {
+            let _ = std::fs::remove_file(&redownload_marker);
+        }
+        if !auto_marker.exists() {
+            let _ = std::fs::write(&auto_marker, b"1");
+            if !s.knowledge.laya_enabled {
+                s.knowledge.laya_enabled = true;
+                let _ = st.settings.set(s.clone());
+            }
+        }
+    } else if s.knowledge.laya_enabled {
+        // 老用户之前开启过 laya_enabled（当时下载的是错误的 model.safetensors），
+        // 记录需要重新下载 GGUF 的标记，并将配置重置为未开启，防止虚假开启状态。
+        let _ = std::fs::write(&redownload_marker, b"1");
+        s.knowledge.laya_enabled = false;
+        let _ = st.settings.set(s.clone());
+    }
+
+    let needs_redownload =
+        !installed && (redownload_marker.exists() || (model_ready && !engine_ready));
+    let enabled = installed && s.knowledge.laya_enabled;
 
     LayaStatus {
         installed,
+        model_ready,
+        engine_ready,
+        needs_redownload,
         size_mb,
         path: target.to_string_lossy().to_string(),
         enabled,
     }
+}
+
+/// 递归查找解压目录中的指定可执行文件
+fn find_extracted_file(root: &Path, target_name: &str) -> Option<PathBuf> {
+    let direct = root.join(target_name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_extracted_file(&p, target_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 pub async fn download_laya_model(
@@ -1000,18 +1352,11 @@ pub async fn download_laya_model(
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
-    let target = get_laya_file_path();
-    if let Some(p) = target.parent() {
-        let _ = std::fs::create_dir_all(p);
-    }
-
-    let urls = [
-        "https://hf-mirror.com/convaiinnovations/laya/resolve/main/multilingual/model.safetensors",
-        "https://huggingface.co/convaiinnovations/laya/resolve/main/multilingual/model.safetensors",
-    ];
-
-    let mut success = false;
-    let mut last_err = String::new();
+    stop_laya_daemon();
+    let dir = get_laya_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = cleanup_legacy_laya_files(&dir);
+    let target = dir.join("laya_multilingual_q8_0.gguf");
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(12))
@@ -1019,91 +1364,193 @@ pub async fn download_laya_model(
         .build()
         .map_err(|e| e.to_string())?;
 
-    for url in urls {
-        let resp = match client.get(url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                last_err = format!("HTTP {}", r.status());
-                continue;
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                continue;
-            }
+    // 1. 若缺少 laya 原生推理执行器（Windows: laya.exe, macOS/Linux: laya），先行自动下载并解压
+    let bin_path = get_laya_bin_path();
+    let bin_name = bin_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("laya")
+        .to_string();
+    if !bin_path.exists() {
+        let _ = on_prog.send(crate::engine::DownloadProgress {
+            target: "laya".into(),
+            stage: "downloading".into(),
+            file: bin_name.clone(),
+            downloaded_mb: 0.0,
+            total_mb: if cfg!(target_os = "macos") { 1.2 } else { 17.5 },
+            percent: 2,
+            message: "正在下载 Laya GGUF 原生推理引擎…".into(),
+        });
+
+        let asset_name = if cfg!(windows) {
+            "laya-windows-x86_64-vulkan.zip"
+        } else if cfg!(target_os = "macos") {
+            "laya-macos-arm64-metal.tar.gz"
+        } else {
+            "laya-linux-x86_64-vulkan.tar.gz"
         };
+        let rt_urls = [
+            format!("https://ghfast.top/https://github.com/monatis/ggmlc/releases/latest/download/{asset_name}"),
+            format!("https://gh-proxy.org/https://github.com/monatis/ggmlc/releases/latest/download/{asset_name}"),
+            format!("https://github.com/monatis/ggmlc/releases/latest/download/{asset_name}"),
+        ];
+        let archive_path = dir.join(asset_name);
+        let tmp_extract = dir.join("laya_extract_tmp");
 
-        let total_bytes = resp.content_length().unwrap_or(840 * 1024 * 1024);
-        let total_mb = (total_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+        for u in &rt_urls {
+            if let Ok(resp) = client.get(u).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if std::fs::write(&archive_path, &bytes).is_ok() {
+                            let _ = std::fs::remove_dir_all(&tmp_extract);
+                            let _ = std::fs::create_dir_all(&tmp_extract);
+                            let _ = std::process::Command::new("tar")
+                                .args([
+                                    "-xf",
+                                    &archive_path.to_string_lossy(),
+                                    "-C",
+                                    &tmp_extract.to_string_lossy(),
+                                ])
+                                .output();
+                            if let Some(extracted_bin) = find_extracted_file(&tmp_extract, &bin_name)
+                            {
+                                let _ = std::fs::copy(&extracted_bin, &bin_path);
+                                #[cfg(not(windows))]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    if let Ok(meta) = std::fs::metadata(&bin_path) {
+                                        let mut perms = meta.permissions();
+                                        perms.set_mode(0o755);
+                                        let _ = std::fs::set_permissions(&bin_path, perms);
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let _ = std::process::Command::new("xattr")
+                                            .args(["-cr", &bin_path.to_string_lossy()])
+                                            .output();
+                                    }
+                                }
+                            }
+                            let _ = std::fs::remove_dir_all(&tmp_extract);
+                            let _ = std::fs::remove_file(&archive_path);
+                            if bin_path.exists() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !bin_path.exists() {
+            return Err("下载 Laya GGUF 原生推理引擎失败，请检查网络连接后重试".into());
+        }
+    }
 
-        let part_path = target.with_extension("safetensors.part");
-        let mut file = match tokio::fs::File::create(&part_path).await {
-            Ok(f) => f,
-            Err(e) => return Err(format!("创建临时文件失败: {e}")),
-        };
+    // 2. 若本地尚无合法的 laya_multilingual_q8_0.gguf，则从 mys/laya-multilingual-GGUF 下载（约 345MB）
+    if !is_valid_gguf(&target) {
+        let urls = [
+            "https://hf-mirror.com/mys/laya-multilingual-GGUF/resolve/main/laya_multilingual_q8_0.gguf",
+            "https://huggingface.co/mys/laya-multilingual-GGUF/resolve/main/laya_multilingual_q8_0.gguf",
+        ];
 
-        let mut stream = resp.bytes_stream();
-        let mut downloaded: u64 = 0;
-        let start_time = std::time::Instant::now();
-        let mut last_emit = std::time::Instant::now();
-        let mut failed = false;
+        let mut success = false;
+        let mut last_err = String::new();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(c) => c,
+        for url in urls {
+            let resp = match client.get(url).send().await {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    last_err = format!("HTTP {}", r.status());
+                    continue;
+                }
                 Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            };
+
+            let total_bytes = resp.content_length().unwrap_or(361_712_736);
+            let total_mb = (total_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+
+            let part_path = target.with_extension("gguf.part");
+            let mut file = match tokio::fs::File::create(&part_path).await {
+                Ok(f) => f,
+                Err(e) => return Err(format!("创建临时文件失败: {e}")),
+            };
+
+            let mut stream = resp.bytes_stream();
+            let mut downloaded: u64 = 0;
+            let start_time = std::time::Instant::now();
+            let mut last_emit = std::time::Instant::now();
+            let mut failed = false;
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        failed = true;
+                        last_err = e.to_string();
+                        break;
+                    }
+                };
+
+                if let Err(e) = file.write_all(&chunk).await {
                     failed = true;
                     last_err = e.to_string();
                     break;
                 }
-            };
 
-            if let Err(e) = file.write_all(&chunk).await {
-                failed = true;
-                last_err = e.to_string();
+                downloaded += chunk.len() as u64;
+
+                if last_emit.elapsed() >= Duration::from_millis(180) || downloaded == total_bytes {
+                    let downloaded_mb =
+                        (downloaded as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+                    let percent = if total_bytes > 0 {
+                        ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+                    } else {
+                        0.0
+                    };
+                    let elapsed_sec = start_time.elapsed().as_secs_f64().max(0.1);
+                    let speed_mbps = (downloaded_mb / elapsed_sec * 10.0).round() / 10.0;
+
+                    let _ = on_prog.send(crate::engine::DownloadProgress {
+                        target: "laya".into(),
+                        stage: "downloading".into(),
+                        file: "laya_multilingual_q8_0.gguf".into(),
+                        downloaded_mb,
+                        total_mb,
+                        percent: percent as u32,
+                        message: format!(
+                            "正在下载 laya_multilingual_q8_0.gguf… {speed_mbps} MB/s"
+                        ),
+                    });
+                    last_emit = std::time::Instant::now();
+                }
+            }
+
+            let _ = file.flush().await;
+            drop(file);
+
+            if !failed && is_valid_gguf(&part_path) {
+                let _ = tokio::fs::rename(&part_path, &target).await;
+                success = true;
                 break;
-            }
-
-            downloaded += chunk.len() as u64;
-
-            if last_emit.elapsed() >= Duration::from_millis(180) || downloaded == total_bytes {
-                let downloaded_mb = (downloaded as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
-                let percent = if total_bytes > 0 {
-                    ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
-                } else {
-                    0.0
-                };
-                let elapsed_sec = start_time.elapsed().as_secs_f64().max(0.1);
-                let speed_mbps = (downloaded_mb / elapsed_sec * 10.0).round() / 10.0;
-
-                let _ = on_prog.send(crate::engine::DownloadProgress {
-                    target: "laya".into(),
-                    stage: "downloading".into(),
-                    file: "model.safetensors".into(),
-                    downloaded_mb,
-                    total_mb,
-                    percent: percent as u32,
-                    message: format!("正在下载 Laya 加速模型… {speed_mbps} MB/s"),
-                });
-                last_emit = std::time::Instant::now();
+            } else {
+                if !failed {
+                    last_err = "下载的文件未通过 GGUF 格式头校验".to_string();
+                }
+                let _ = tokio::fs::remove_file(&part_path).await;
             }
         }
 
-        drop(file);
-
-        if !failed {
-            let _ = tokio::fs::rename(&part_path, &target).await;
-            success = true;
-            break;
-        } else {
-            let _ = tokio::fs::remove_file(&part_path).await;
+        if !success {
+            return Err(format!("下载 GGUF 加速模型失败: {last_err}"));
         }
     }
 
-    if !success {
-        return Err(format!("下载加速模型失败: {last_err}"));
-    }
-
-    // 下载成功后，自动为用户开启极速模式
+    // 3. 下载并校验通过后，清除重下标记并自动启用极速模式
+    let _ = std::fs::remove_file(dir.join(".needs_gguf_redownload"));
+    let _ = std::fs::write(dir.join(".gguf_auto_enabled"), b"1");
     let st = app.state::<crate::AppState>();
     let mut s = st.settings.get();
     s.knowledge.laya_enabled = true;
@@ -1112,21 +1559,26 @@ pub async fn download_laya_model(
     let _ = on_prog.send(crate::engine::DownloadProgress {
         target: "laya".into(),
         stage: "done".into(),
-        file: "model.safetensors".into(),
-        downloaded_mb: 840.0,
-        total_mb: 840.0,
+        file: "laya_multilingual_q8_0.gguf".into(),
+        downloaded_mb: 345.0,
+        total_mb: 345.0,
         percent: 100,
-        message: "Laya 加速模型已下载就绪并自动启用".into(),
+        message: "Laya GGUF 加速模型已下载就绪并自动启用".into(),
     });
 
     Ok(check_laya_status(app))
 }
 
 pub fn delete_laya_model(app: &AppHandle) -> Result<(), String> {
+    stop_laya_daemon();
+    let dir = get_laya_dir();
     let target = get_laya_file_path();
     if target.exists() {
         std::fs::remove_file(&target).map_err(|e| format!("删除模型文件失败: {e}"))?;
     }
+    let _ = cleanup_legacy_laya_files(&dir);
+    let _ = std::fs::remove_file(dir.join(".gguf_auto_enabled"));
+    let _ = std::fs::remove_file(dir.join(".needs_gguf_redownload"));
     let st = app.state::<crate::AppState>();
     let mut s = st.settings.get();
     s.knowledge.laya_enabled = false;
@@ -1877,5 +2329,75 @@ mod tests {
         let plain = parse_prompt_markdown("vision", "custom", Path::new("custom.md"), "直接描述图片细节", 123);
         assert_eq!(plain.id, "custom");
         assert_eq!(plain.body, "直接描述图片细节");
+    }
+
+    #[test]
+    fn test_laya_gguf_validation_and_legacy_cleanup() {
+        let tmp_dir = std::env::temp_dir().join(format!("minibot_laya_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let fake_safetensors = tmp_dir.join("model.safetensors");
+        let broken_gguf = tmp_dir.join("broken.gguf");
+        std::fs::write(&fake_safetensors, b"not a gguf file").unwrap();
+        std::fs::write(&broken_gguf, b"HTML error page").unwrap();
+
+        assert!(!is_valid_gguf(&fake_safetensors));
+        assert!(!is_valid_gguf(&broken_gguf));
+        assert!(
+            cleanup_legacy_laya_files(&tmp_dir),
+            "应当识别并清理旧版 model.safetensors 与损坏的 .gguf"
+        );
+        assert!(!fake_safetensors.exists());
+        assert!(!broken_gguf.exists());
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_laya_gguf_rerank_integration() {
+        let gguf = get_laya_file_path();
+        let bin = get_laya_bin_path();
+        assert!(
+            gguf.to_string_lossy().ends_with("laya_multilingual_q8_0.gguf"),
+            "Laya 模型路径应指向 laya_multilingual_q8_0.gguf，实际为: {:?}",
+            gguf
+        );
+        if gguf.exists() && bin.exists() {
+            assert!(
+                is_valid_gguf(&gguf),
+                "本地 laya_multilingual_q8_0.gguf 必须通过 GGUF 魔数与体积校验"
+            );
+            let mut hits = vec![
+                KbSearchHit {
+                    path: "doc1.md".into(),
+                    relative_path: "doc1.md".into(),
+                    title: "办公时间".into(),
+                    heading: "考勤规定".into(),
+                    content: "我们的上班时间是周一至周五早上9点到下午18点。".into(),
+                    line_start: 1,
+                    line_end: 5,
+                    score: 100.0,
+                    origin_image: None,
+                },
+                KbSearchHit {
+                    path: "doc2.md".into(),
+                    relative_path: "doc2.md".into(),
+                    title: "公司地址".into(),
+                    heading: "联系方式".into(),
+                    content: "公司总部地址位于北京市海淀区中关村软件园。".into(),
+                    line_start: 1,
+                    line_end: 5,
+                    score: 95.0,
+                    origin_image: None,
+                },
+            ];
+            let res = laya_rerank_hits("公司地址在哪里？", &mut hits);
+            stop_laya_daemon();
+            assert!(res.is_some(), "Laya GGUF 重排应当成功返回评分数量与耗时");
+            assert_eq!(
+                hits[0].path, "doc2.md",
+                "经过 Laya GGUF 神经语义重排后，原本分数较低的 doc2.md（公司地址）应排在第一位"
+            );
+        }
     }
 }

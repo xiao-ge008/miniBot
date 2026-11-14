@@ -157,8 +157,10 @@
   }
 
   // ---------- 坐标 ----------
-  const k = () => window.innerWidth / Math.max(W, 1); // CSS px / 物理 px
-  const toPhys = (e: MouseEvent | PointerEvent) => toCapturePoint(e.clientX, e.clientY, W, H, window.innerWidth, window.innerHeight);
+  const viewW = () => base?.clientWidth || window.innerWidth;
+  const viewH = () => base?.clientHeight || window.innerHeight;
+  const k = () => viewW() / Math.max(W, 1); // CSS px / 物理 px
+  const toPhys = (e: MouseEvent | PointerEvent) => toCapturePoint(e.clientX, e.clientY, W, H, viewW(), viewH());
   const norm = (x1: number, y1: number, x2: number, y2: number): Rect => ({
     x: Math.min(x1, x2),
     y: Math.min(y1, y2),
@@ -367,6 +369,30 @@
     }
     const showMag = mode === 'color' || phase === 'idle' || phase === 'selecting' || phase === 'resizing';
     if (showMag) drawMagnifier(ctx);
+
+    // 始终在画布上绘制高对比度软件十字准星，彻底规避部分 Windows 显卡驱动隐藏硬件光标导致的“看不到鼠标”问题
+    if (phase === 'idle' || phase === 'selecting' || softwareCursor) {
+      ctx.save();
+      const arm = Math.round(9 * scale);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.lineWidth = Math.max(2.5, 2.5 * scale);
+      ctx.beginPath();
+      ctx.moveTo(mouse.x - arm, mouse.y);
+      ctx.lineTo(mouse.x + arm, mouse.y);
+      ctx.moveTo(mouse.x, mouse.y - arm);
+      ctx.lineTo(mouse.x, mouse.y + arm);
+      ctx.stroke();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1.2, 1.2 * scale);
+      ctx.beginPath();
+      ctx.moveTo(mouse.x - arm, mouse.y);
+      ctx.lineTo(mouse.x + arm, mouse.y);
+      ctx.moveTo(mouse.x, mouse.y - arm);
+      ctx.lineTo(mouse.x, mouse.y + arm);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   function render() {
@@ -403,7 +429,10 @@
   function onPointerDown(e: PointerEvent) {
     if (!sessionId || !img) return;
     if (toolMenuOpen) toolMenuOpen = false;
-    if (e.button !== 0 || !e.isPrimary || activePointerId !== null) return;
+    if (e.button !== 0 || !e.isPrimary) return;
+    if (activePointerId !== null && activePointerId !== e.pointerId) {
+      releasePointer();
+    }
     const p = toPhys(e);
     moveSoftwareCursor(e);
     if (textEdit) {
@@ -477,6 +506,7 @@
   }
 
   function onPointerMove(e: PointerEvent) {
+    if (!sessionId || !img) return;
     if (activePointerId !== null && e.pointerId !== activePointerId) return;
     moveSoftwareCursor(e);
     const p = toPhys(e);
@@ -515,7 +545,8 @@
   }
 
   function onPointerUp(e: PointerEvent) {
-    if (activePointerId !== e.pointerId) return;
+    if (!sessionId || !img) return;
+    if (activePointerId !== null && activePointerId !== e.pointerId) return;
     const p = toPhys(e);
     mouse = p;
     moveSoftwareCursor(e);
@@ -560,7 +591,6 @@
       else if (inRect(sel, p.x, p.y)) c = tool ? (tool === 'text' ? 'text' : 'crosshair') : 'move';
       else c = 'default';
     }
-    if (softwareCursor) c = 'none';
     if (overlay && (currentCursor !== c || overlay.style.cursor !== c)) {
       currentCursor = c;
       overlay.style.cursor = c;
@@ -1066,11 +1096,13 @@
   // 选区左上角尺寸胶囊（CSS px，与选区左边缘精准对齐）
   const whPos = $derived.by(() => {
     if (!sel) return null;
-    const kx = window.innerWidth / Math.max(W, 1);
-    const ky = window.innerHeight / Math.max(H, 1);
+    const vw = viewW();
+    const vh = viewH();
+    const kx = vw / Math.max(W, 1);
+    const ky = vh / Math.max(H, 1);
     const rx = Math.round(sel.x * kx);
     const ry = Math.round(sel.y * ky);
-    const left = Math.max(6, Math.min(window.innerWidth - 110, rx));
+    const left = Math.max(6, Math.min(vw - 110, rx));
     const top = ry > 32 ? ry - 28 : ry + 6;
     return { left, top };
   });
@@ -1078,8 +1110,10 @@
   // 工具条位置（CSS px，基于真实 DOM 宽高与截图框精准对齐）
   const bar = $derived.by(() => {
     if (!sel || phase === 'selecting' || phase === 'moving' || phase === 'resizing') return null;
-    const kx = window.innerWidth / Math.max(W, 1);
-    const ky = window.innerHeight / Math.max(H, 1);
+    const vw = viewW();
+    const vh = viewH();
+    const kx = vw / Math.max(W, 1);
+    const ky = vh / Math.max(H, 1);
     const rx = Math.round(sel.x * kx);
     const ry = Math.round(sel.y * ky);
     const rw = Math.round(sel.w * kx);
@@ -1090,13 +1124,13 @@
 
     // 默认与截图框左边缘对齐；若右侧空间不足则与截图框右边缘对齐
     let left = rx;
-    if (left + bw > window.innerWidth - 8) {
+    if (left + bw > vw - 8) {
       left = rx + rw - bw;
     }
-    left = Math.max(8, Math.min(window.innerWidth - bw - 8, left));
+    left = Math.max(8, Math.min(vw - bw - 8, left));
 
     let top = ry + rh + 6;
-    if (top + bh > window.innerHeight - 8) {
+    if (top + bh > vh - 8) {
       top = ry - bh - 6;
     }
     if (top < 8) {
@@ -1106,10 +1140,16 @@
   });
 
   const curToolMeta = $derived(TOOLS.find((t) => t.id === activeTool) ?? TOOLS[0]);
-  const menuDropUp = $derived(bar ? bar.top + (barH || 40) + 170 > window.innerHeight : false);
+  const menuDropUp = $derived(bar ? bar.top + (barH || 40) + 170 > viewH() : false);
+  const canvasSizeStyle = $derived(W > 0 && H > 0 && scale > 0 ? `width:${W / scale}px;height:${H / scale}px` : '');
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window
+  onkeydown={onKey}
+  onpointermove={onPointerMove}
+  onpointerup={onPointerUp}
+  onpointercancel={onPointerCancel}
+/>
 
 {#snippet toolSvg(id: Tool)}
   <svg
@@ -1158,14 +1198,12 @@
       <path d="M10 1v18M1 10h18" stroke="white" stroke-width="1" />
     </svg>
   </div>
-  <canvas class="layer" bind:this={base}></canvas>
+  <canvas class="layer" bind:this={base} style={canvasSizeStyle}></canvas>
   <canvas
     class="layer"
     bind:this={overlay}
+    style={canvasSizeStyle}
     onpointerdown={onPointerDown}
-    onpointermove={onPointerMove}
-    onpointerup={onPointerUp}
-    onpointercancel={onPointerCancel}
     onlostpointercapture={onLostPointerCapture}
     onpointerleave={hideSoftwareCursor}
     ondblclick={() => sel && !tool && act(mode === 'chat' ? 'attach_chat' : 'copy')}

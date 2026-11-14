@@ -191,6 +191,14 @@ pub fn run() {
             // 划词/截图临时历史清理（默认保留一个月 30 天，不影响永久 AI 聊天记录）：启动时一次，之后每 24 小时
             let h2 = handle.clone();
             tauri::async_runtime::spawn(async move {
+                // 启动时巡检 Laya 加速模型状态，自动清理老版本遗留的错误 model.safetensors 并标记需重新下载 GGUF
+                let laya_st = kb::check_laya_status(&h2);
+                if laya_st.needs_redownload {
+                    log_msg(
+                        &h2,
+                        "[kb][laya] 检测到旧版非 GGUF 模型已清理，需重新下载 laya_multilingual_q8_0.gguf",
+                    );
+                }
                 loop {
                     {
                         let st = h2.state::<AppState>();

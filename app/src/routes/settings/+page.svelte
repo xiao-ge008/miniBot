@@ -258,11 +258,18 @@
     }
   }
 
+  let layaAutoRedownloadTried = false;
+
   async function refreshLayaStatus() {
     try {
       layaStatus = await ipc.kbLayaStatus();
       if (s && layaStatus) {
         s.knowledge.laya_enabled = layaStatus.enabled;
+      }
+      if (layaStatus?.needs_redownload && !layaAutoRedownloadTried && !layaDownloading) {
+        layaAutoRedownloadTried = true;
+        flashMsg('🔄 检测到旧版 Laya 模型已升级为 GGUF，正在为您自动重新下载 (345MB)…', 5000);
+        void handleDownloadLaya();
       }
     } catch (e) {
       console.error('获取 Laya 状态失败:', e);
@@ -316,18 +323,18 @@
     layaDlProgress = {
       target: 'laya',
       stage: 'downloading',
-      file: 'model.safetensors',
+      file: 'laya_multilingual_q8_0.gguf',
       downloaded_mb: 0,
-      total_mb: 840,
+      total_mb: 345,
       percent: 1,
-      message: '正在连接下载源…',
+      message: '正在连接 mys/laya-multilingual-GGUF 下载源…',
     };
     try {
       layaStatus = await ipc.kbDownloadLaya((p) => {
         layaDlProgress = p;
       });
       if (s) s.knowledge.laya_enabled = true;
-      flashMsg('✓ Laya 加速模型已下载就绪并自动启用');
+      flashMsg('✓ Laya GGUF 加速模型已下载就绪并自动启用');
     } catch (e) {
       layaDlError = `下载失败: ${e}`;
       flashMsg(`下载失败: ${e}`, 4000);
@@ -1159,6 +1166,8 @@
           <span>{t}</span>
           {#if t === '版本更新' && updateInfo?.has_update}
             <span class="nav-update-dot" title="发现新版本 v{updateInfo.latest_version}">NEW</span>
+          {:else if t === '个人知识库' && layaStatus?.needs_redownload}
+            <span class="nav-update-dot" title="旧版 Laya 模型需升级为 GGUF">升级</span>
           {/if}
         </button>
       {/each}
@@ -2205,12 +2214,28 @@
               <div class="row-item">
                 <div class="row-meta">
                   <div class="row-label">
-                    Laya 本地检索加速
-                    <span class="laya-pill" class:ok={layaStatus?.installed}>
-                      {layaStatus?.installed ? `已就绪 ${layaStatus.size_mb}MB` : '可选 840MB'}
+                    Laya 本地检索加速 (GGUF)
+                    <span
+                      class="laya-pill"
+                      class:ok={layaStatus?.installed}
+                      style={layaStatus?.needs_redownload ? 'background: rgba(245,158,11,0.16); color: #f59e0b; border-color: rgba(245,158,11,0.35);' : ''}
+                    >
+                      {#if layaStatus?.installed}
+                        已就绪 {layaStatus.size_mb}MB
+                      {:else if layaStatus?.needs_redownload}
+                        ⚠ 需重下 GGUF · 345MB
+                      {:else}
+                        可选 345MB
+                      {/if}
                     </span>
                   </div>
-                  <div class="row-desc">可选下载加速相关性判定；未下载时自动使用当前对话模型</div>
+                  <div class="row-desc">
+                    {#if layaStatus?.needs_redownload}
+                      检测到旧版非 GGUF 模型已自动清理，需从 mys/laya-multilingual-GGUF 重新下载 laya_multilingual_q8_0.gguf
+                    {:else}
+                      基于 laya_multilingual_q8_0.gguf 的毫秒级多语言神经语义重排；未安装时使用关键词混合检索
+                    {/if}
+                  </div>
                 </div>
                 <div class="laya-compact-ctrl">
                   {#if layaDownloading}
@@ -2225,7 +2250,7 @@
                     </button>
                   {:else}
                     <button type="button" class="btn" onclick={handleDownloadLaya}>
-                      ⚡ 下载加速
+                      {layaStatus?.needs_redownload ? '🔄 重新下载 GGUF' : '⚡ 下载加速'}
                     </button>
                   {/if}
                 </div>
@@ -2236,7 +2261,7 @@
                     <div class="progress-fill" style="width: {layaDlProgress?.percent || 0}%"></div>
                   </div>
                   <div class="laya-dl-foot">
-                    <span>{layaDlProgress?.message || '正在下载…'} ({layaDlProgress?.downloaded_mb || 0}/{layaDlProgress?.total_mb || 840} MB)</span>
+                    <span>{layaDlProgress?.message || '正在下载…'} ({layaDlProgress?.downloaded_mb || 0}/{layaDlProgress?.total_mb || 345} MB)</span>
                     {#if layaDlError}<span class="dl-err">{layaDlError}</span>{/if}
                   </div>
                 </div>

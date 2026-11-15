@@ -54,7 +54,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     fetch(`${request.serverUrl || DEFAULT_SERVER_URL}/v1/clip/suppress`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ms: request.ms || 1200 })
+      body: JSON.stringify({
+        ms: request.ms || 2000,
+        text: request.text || ""
+      })
     }).catch(() => {});
     sendResponse({ ok: true });
     return true;

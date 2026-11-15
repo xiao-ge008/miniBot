@@ -19,10 +19,34 @@
     enableSelectionTip: true
   };
 
-  // 获取配置
+  // 获取配置并监听实时变更
   chrome.runtime.sendMessage({ action: "GET_SETTINGS" }, (res) => {
     if (res) settings = Object.assign(settings, res);
   });
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "sync") {
+        for (const [k, v] of Object.entries(changes)) {
+          settings[k] = v.newValue;
+        }
+        if (!settings.enableSelectionTip && typeof tipBar !== "undefined") {
+          tipBar.style.display = "none";
+        }
+      }
+    });
+  }
+
+  // 通知本地桌面端抑制 Tip 浮窗（并隐藏已露头的桌面 Tip）
+  function suppressDesktopTip(ms = 2200, text = "") {
+    try {
+      chrome.runtime.sendMessage({
+        action: "SUPPRESS_DESKTOP_TIP",
+        serverUrl: settings.serverUrl,
+        ms,
+        text
+      });
+    } catch (_) {}
+  }
 
   // 安全代理 POST 请求
   function safePost(endpoint, payload) {
@@ -49,19 +73,28 @@
   }
 
   // =========================================================================
-  // 1. 方案 A：剪贴板指纹注入与桌面 Tip 抑制
+  // 1. 方案 A：剪贴板指纹注入与桌面 Tip 跨端防冲突抑制
   // =========================================================================
+  document.addEventListener("keydown", (e) => {
+    if (!settings.enableSelectionTip) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key && e.key.toLowerCase() === "c") {
+      const selection = window.getSelection();
+      const text = selection ? selection.toString().trim() : "";
+      if (text.length >= 2) {
+        suppressDesktopTip(2500, text);
+      }
+    }
+  }, true);
+
   document.addEventListener("copy", (e) => {
-    chrome.runtime.sendMessage({
-      action: "SUPPRESS_DESKTOP_TIP",
-      serverUrl: settings.serverUrl,
-      ms: 1200
-    });
+    if (!settings.enableSelectionTip) return;
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const selectedText = selection.toString();
-    if (!selectedText) return;
+    if (!selectedText || selectedText.trim().length < 2) return;
+
+    suppressDesktopTip(2500, selectedText);
 
     try {
       if (e.clipboardData) {
@@ -70,6 +103,10 @@
         e.preventDefault();
       }
     } catch (_) {}
+
+    if (typeof showSelectionTipBar === "function") {
+      showSelectionTipBar(selection, selectedText.trim());
+    }
   }, true);
 
   // =========================================================================
@@ -424,9 +461,34 @@
 
   let selectedTextCache = "";
 
+  function showSelectionTipBar(selection, text) {
+    if (!selection || selection.rangeCount === 0 || !text || text.length < 2) return;
+    const wasSameVisible = tipBar.style.display === "flex" && selectedTextCache === text;
+    selectedTextCache = text;
+    if (wasSameVisible) return;
+
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) return;
+
+    const scrollX = window.scrollX || document.documentElement.scrollLeft;
+    const scrollY = window.scrollY || document.documentElement.scrollTop;
+
+    tipBar.style.left = `${Math.max(10, rect.left + scrollX)}px`;
+    tipBar.style.top = `${rect.bottom + scrollY + 8}px`;
+    tipBar.style.display = "flex";
+  }
+
   document.addEventListener("mouseup", (e) => {
     if (!settings.enableSelectionTip) return;
     if (hostDiv.contains(e.target)) return;
+
+    // 0ms 立即预检选区并通知本地桌面端抑制（抢在桌面端 65ms 划词轮询前生效，阻止桌面端发模拟 Ctrl+C 与弹第二个窗）
+    const preSel = window.getSelection();
+    const preText = preSel ? preSel.toString().trim() : "";
+    if (preText.length >= 2) {
+      suppressDesktopTip(2500, preText);
+    }
 
     setTimeout(() => {
       const selection = window.getSelection();
@@ -437,16 +499,8 @@
         return;
       }
 
-      selectedTextCache = text;
-      const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-
-      const scrollX = window.scrollX || document.documentElement.scrollLeft;
-      const scrollY = window.scrollY || document.documentElement.scrollTop;
-
-      tipBar.style.left = `${Math.max(10, rect.left + scrollX)}px`;
-      tipBar.style.top = `${rect.bottom + scrollY + 8}px`;
-      tipBar.style.display = "flex";
+      suppressDesktopTip(2500, text);
+      showSelectionTipBar(selection, text);
     }, 50);
   });
 
@@ -463,6 +517,7 @@
     tipBar.style.display = "none";
 
     if (action === "copy") {
+      suppressDesktopTip(2500, selectedTextCache);
       navigator.clipboard.writeText(selectedTextCache + ZERO_WIDTH_FINGERPRINT);
       showToast("📋 已复制并抑制桌面 Tip");
       return;

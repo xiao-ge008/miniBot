@@ -15,9 +15,11 @@ pub struct ClipWatcher {
     paused_until: AtomicU64,
     /// 程序内部临时抑制（模拟复制/粘贴期间），UNIX 毫秒
     suppress_until: AtomicU64,
+    /// 网页插件触发的跨端防冲突抑制，UNIX 毫秒（独立于内部模拟复制，防止被重置）
+    ext_suppress_until: AtomicU64,
     /// 自己写入剪贴板后需忽略的序号
     ignore_seq: AtomicU32,
-    /// 最近一次触发的文本与毫秒时间戳（仅用于 500ms 内的单次按键重复去抖）
+    /// 最近一次触发的文本与毫秒时间戳（用于短时间重复去抖与插件清洗去重）
     last_text: Mutex<(String, u64)>,
     /// 最近一次写入或捕获的图片特征 (宽, 高, 字节大小, 时间戳)，防止截屏复制等自身写入触发二次 Tip
     last_image_sig: Mutex<Option<(usize, usize, usize, u64)>>,
@@ -96,12 +98,35 @@ impl ClipWatcher {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.paused_until.load(Ordering::SeqCst) > now() || self.suppress_until.load(Ordering::SeqCst) > now_ms()
+        let n_ms = now_ms();
+        self.paused_until.load(Ordering::SeqCst) > now()
+            || self.suppress_until.load(Ordering::SeqCst) > n_ms
+            || self.ext_suppress_until.load(Ordering::SeqCst) > n_ms
     }
 
-    /// 临时抑制 Tip（ms=0 解除）
+    /// 临时抑制 Tip（ms=0 解除内部模拟复制抑制，不影响插件外部抑制）
     pub fn suppress(&self, ms: u64) {
         self.suppress_until.store(if ms == 0 { 0 } else { now_ms() + ms }, Ordering::SeqCst);
+    }
+
+    /// 来自网页插件或零宽指纹的外部抑制（只增不减，不会被内部 grab_selection 重置）
+    pub fn suppress_from_ext(&self, ms: u64) {
+        let target = now_ms() + ms;
+        let cur = self.ext_suppress_until.load(Ordering::SeqCst);
+        if target > cur {
+            self.ext_suppress_until.store(target, Ordering::SeqCst);
+        }
+    }
+
+    /// 检查当前是否处于网页插件抑制窗口期
+    pub fn is_ext_suppressed(&self) -> bool {
+        self.ext_suppress_until.load(Ordering::SeqCst) > now_ms()
+    }
+
+    /// 记录最近一次处理的文本，避免插件清洗写回或短时间重复触发二次弹窗
+    pub fn record_last_text(&self, text: &str) {
+        let mut last = self.last_text.lock().unwrap();
+        *last = (text.trim().to_string(), now_ms());
     }
 
     /// 自己即将写剪贴板：写完后调用 mark_self_write
@@ -146,29 +171,32 @@ impl ClipWatcher {
                     continue;
                 }
                 let tip = st.settings.get().tip;
-                if !tip.enabled || w.is_paused() {
-                    continue;
-                }
-                let fg = crate::winutil::foreground_process().unwrap_or_default().to_lowercase();
-                if is_self_or_blacklisted(&fg, &tip.blacklist) {
-                    continue;
-                }
                 // 稍等浏览器/编辑器完成多格式写入，并带重试读取
                 std::thread::sleep(Duration::from_millis(45));
                 if let Some(text) = read_text_retry() {
-                    // 方案 A：检测是否来自网页插件的零宽防冲突指纹
+                    // 方案 A：优先检测是否来自网页插件的零宽防冲突指纹（即使已处于 paused/suppress 态也必须清洗零宽字符）
                     if text.contains(ZERO_WIDTH_FINGERPRINT) {
                         crate::log_msg(&app, "[clip] 检测到网页插件专属标记，抑制桌面 Tip 并清洗剪贴板".to_string());
                         let cleaned = text.replace(ZERO_WIDTH_FINGERPRINT, "");
+                        w.record_last_text(&cleaned);
+                        w.suppress_from_ext(1800);
                         if set_text_retry(cleaned) {
                             w.mark_self_write();
-                            last_seq = crate::winutil::clipboard_seq();
                         }
+                        last_seq = crate::winutil::clipboard_seq();
+                        crate::wins::hide(&app, "tip");
                         continue;
                     }
 
                     // 同步最新 seq，避免同一轮多步写入重复触发
                     last_seq = crate::winutil::clipboard_seq();
+                    if !tip.enabled || w.is_paused() {
+                        continue;
+                    }
+                    let fg = crate::winutil::foreground_process().unwrap_or_default().to_lowercase();
+                    if is_self_or_blacklisted(&fg, &tip.blacklist) {
+                        continue;
+                    }
                     let t = text.trim();
                     let n = t.chars().count();
                     if n < tip.min_chars || n > tip.max_chars {
@@ -177,7 +205,7 @@ impl ClipWatcher {
                     {
                         let ts = now_ms();
                         let mut last = w.last_text.lock().unwrap();
-                        if last.0 == t && ts.saturating_sub(last.1) < 500 {
+                        if last.0 == t && ts.saturating_sub(last.1) < 1500 {
                             continue;
                         }
                         *last = (t.to_string(), ts);
@@ -185,25 +213,36 @@ impl ClipWatcher {
                     crate::log_msg(&app, format!("[clip] 检测到复制文本 ({n} chars) from {fg} -> show_tip"));
                     let p = Payload::text(t.to_string(), Origin::Clipboard, Some(fg), crate::winutil::foreground_hwnd());
                     crate::wins::show_tip(&app, p);
-                } else if let Some(img) = read_image_retry() {
-                    last_seq = crate::winutil::clipboard_seq();
-                    if img.width < 8 || img.height < 8 {
+                } else {
+                    if !tip.enabled || w.is_paused() {
+                        last_seq = crate::winutil::clipboard_seq();
                         continue;
                     }
-                    if w.should_ignore_image(img.width, img.height, img.bytes.len()) {
-                        crate::log_msg(&app, format!("[clip] 忽略自身写入或短时间内重复图片 ({}x{})", img.width, img.height));
+                    let fg = crate::winutil::foreground_process().unwrap_or_default().to_lowercase();
+                    if is_self_or_blacklisted(&fg, &tip.blacklist) {
+                        last_seq = crate::winutil::clipboard_seq();
                         continue;
                     }
-                    let Some(rgba) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) else { continue };
-                    let png = crate::imgutil::encode_png(&rgba);
-                    crate::log_msg(&app, format!("[clip] 检测到复制图片 ({}x{}) from {fg} -> show_tip", img.width, img.height));
-                    let mut p = Payload::image(png, Origin::Clipboard, Some(fg), crate::winutil::foreground_hwnd());
-                    // 后台顺手检测二维码，决定 Tip 是否显示「识别二维码」
-                    let codes = crate::qr::decode_rgba(&rgba);
-                    if !codes.is_empty() {
-                        p.meta = serde_json::json!({ "qr": codes });
+                    if let Some(img) = read_image_retry() {
+                        last_seq = crate::winutil::clipboard_seq();
+                        if img.width < 8 || img.height < 8 {
+                            continue;
+                        }
+                        if w.should_ignore_image(img.width, img.height, img.bytes.len()) {
+                            crate::log_msg(&app, format!("[clip] 忽略自身写入或短时间内重复图片 ({}x{})", img.width, img.height));
+                            continue;
+                        }
+                        let Some(rgba) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) else { continue };
+                        let png = crate::imgutil::encode_png(&rgba);
+                        crate::log_msg(&app, format!("[clip] 检测到复制图片 ({}x{}) from {fg} -> show_tip", img.width, img.height));
+                        let mut p = Payload::image(png, Origin::Clipboard, Some(fg), crate::winutil::foreground_hwnd());
+                        // 后台顺手检测二维码，决定 Tip 是否显示「识别二维码」
+                        let codes = crate::qr::decode_rgba(&rgba);
+                        if !codes.is_empty() {
+                            p.meta = serde_json::json!({ "qr": codes });
+                        }
+                        crate::wins::show_tip(&app, p);
                     }
-                    crate::wins::show_tip(&app, p);
                 }
             }
         });
@@ -288,18 +327,22 @@ impl ClipWatcher {
                         continue;
                     }
 
-                    // 稍作等待，确保浏览器完成选区状态更新且用户未继续点击
+                    // 稍作等待，确保浏览器完成选区状态更新（及插件 mouseup 预抑制信号送达）且用户未继续点击
                     std::thread::sleep(Duration::from_millis(65));
-                    if crate::winutil::is_mouse_left_down() {
+                    if crate::winutil::is_mouse_left_down() || st.clip.is_paused() {
                         continue;
                     }
                     let hwnd = crate::winutil::foreground_hwnd();
                     if let Some(text) = crate::actions::grab_selection_clean(&app) {
+                        if st.clip.is_ext_suppressed() || text.contains(ZERO_WIDTH_FINGERPRINT) {
+                            continue;
+                        }
                         let t = text.trim();
                         let n = t.chars().count();
                         if n < tip.min_chars || n > tip.max_chars {
                             continue;
                         }
+                        st.clip.record_last_text(t);
                         crate::log_msg(&app, format!("[selection-mouse] 划词获取文本 ({n} chars) from {fg} -> show_tip"));
                         let p = Payload::text(t.to_string(), Origin::Selection, Some(fg), hwnd);
                         crate::wins::show_tip(&app, p);
@@ -325,4 +368,38 @@ pub fn kind_of_text(t: &str) -> PayloadKind {
         return PayloadKind::Color;
     }
     PayloadKind::Text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ext_suppress_isolated_from_internal_suppress() {
+        let w = ClipWatcher::default();
+        assert!(!w.is_paused());
+        assert!(!w.is_ext_suppressed());
+
+        // 网页插件发起 2000ms 外部抑制
+        w.suppress_from_ext(2000);
+        assert!(w.is_ext_suppressed());
+        assert!(w.is_paused());
+
+        // 即使内部模拟 Ctrl+C 结束时调用 suppress(0) 或 suppress(350)，也不得清除插件外部抑制
+        w.suppress(0);
+        assert!(w.is_ext_suppressed());
+        assert!(w.is_paused());
+
+        w.suppress(350);
+        assert!(w.is_ext_suppressed());
+        assert!(w.is_paused());
+
+        // 验证清洗后文本登记
+        let dirty = format!("测试跨端防冲突文本{}", ZERO_WIDTH_FINGERPRINT);
+        let cleaned = dirty.replace(ZERO_WIDTH_FINGERPRINT, "");
+        w.record_last_text(&cleaned);
+        let last = w.last_text.lock().unwrap();
+        assert_eq!(last.0, "测试跨端防冲突文本");
+        assert!(last.1 > 0);
+    }
 }

@@ -46,6 +46,9 @@ pub fn grab_selection_clean(app: &AppHandle) -> Option<String> {
 
 fn grab_selection_inner(app: &AppHandle, clean: bool) -> Option<String> {
     let st = app.state::<crate::AppState>();
+    if clean && st.clip.is_ext_suppressed() {
+        return None;
+    }
     let old = crate::clip::read_text_retry();
     let seq0 = crate::winutil::clipboard_seq();
     st.clip.suppress(2000); // 避免触发复制 Tip
@@ -65,12 +68,27 @@ fn grab_selection_inner(app: &AppHandle, clean: bool) -> Option<String> {
     }
     std::thread::sleep(Duration::from_millis(30));
     let text = crate::clip::read_text_retry();
+    let has_ext_fingerprint = text
+        .as_deref()
+        .map(|t| t.contains(crate::clip::ZERO_WIDTH_FINGERPRINT))
+        .unwrap_or(false);
     if let Some(o) = old {
-        let _ = crate::clip::set_text_retry(o);
+        let o_clean = o.replace(crate::clip::ZERO_WIDTH_FINGERPRINT, "");
+        let _ = crate::clip::set_text_retry(o_clean);
+    } else if has_ext_fingerprint {
+        if let Some(ref t) = text {
+            let _ = crate::clip::set_text_retry(t.replace(crate::clip::ZERO_WIDTH_FINGERPRINT, ""));
+        }
     }
     st.clip.mark_self_write();
     st.clip.suppress(350);
-    text.filter(|t| !t.trim().is_empty())
+    if clean && (has_ext_fingerprint || st.clip.is_ext_suppressed()) {
+        st.clip.suppress_from_ext(1500);
+        crate::log_msg(app, "[selection-mouse] 检测到网页插件已接管划词，跳过桌面 Tip".to_string());
+        return None;
+    }
+    text.map(|t| t.replace(crate::clip::ZERO_WIDTH_FINGERPRINT, ""))
+        .filter(|t| !t.trim().is_empty())
 }
 
 fn selection(app: &AppHandle) {
@@ -81,7 +99,7 @@ fn selection(app: &AppHandle) {
         // 1. 优先抓取当前鼠标选区文字；2. 若未触发新剪贴板序号（如用户已提前 Ctrl+C 复制过），自动回退读取当前剪贴板文字
         let text = grab_selection(&app).or_else(|| {
             crate::clip::read_text_retry()
-                .map(|t| t.trim().to_string())
+                .map(|t| t.replace(crate::clip::ZERO_WIDTH_FINGERPRINT, "").trim().to_string())
                 .filter(|t| !t.is_empty())
         });
         if let Some(t) = text {

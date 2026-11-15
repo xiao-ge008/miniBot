@@ -296,9 +296,15 @@ async fn qr_encode(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Va
 }
 
 async fn clip_suppress(State(gw): State<Gw>, Json(body): Json<Value>) -> Response {
-    let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1200);
+    let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1800);
     let st = gw.app.state::<crate::AppState>();
-    st.clip.suppress(ms);
+    st.clip.suppress_from_ext(ms);
+    if let Some(t) = body.get("text").and_then(|v| v.as_str()) {
+        if !t.trim().is_empty() {
+            st.clip.record_last_text(t);
+        }
+    }
+    crate::wins::hide(&gw.app, "tip");
     Json(json!({ "ok": true, "suppressed_ms": ms })).into_response()
 }
 

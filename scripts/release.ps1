@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   miniBot 一键版本管理与 GitHub 自动打包发布脚本
 .DESCRIPTION
@@ -75,7 +75,36 @@ if (Test-Path $CargoLockPath) {
     [System.IO.File]::WriteAllText($CargoLockPath, $lockContent, $utf8NoBom)
 }
 
-Write-Host "[1/3] 已同步更新 package.json / tauri.conf.json / Cargo.toml / Cargo.lock 版本号为 $newVer" -ForegroundColor Green
+# 3.5 同步更新浏览器插件 manifest.json 版本号并重新打包标准跨平台 ZIP
+$ExtDir = Join-Path $RootDir "extension"
+$ManifestPath = Join-Path $ExtDir "manifest.json"
+if (Test-Path $ManifestPath) {
+    $manifestContent = [System.IO.File]::ReadAllText($ManifestPath, $utf8NoBom)
+    $manifestContent = [regex]::Replace($manifestContent, '"version"\s*:\s*"[^"]+"', "`"version`": `"$newVer`"", 1)
+    [System.IO.File]::WriteAllText($ManifestPath, $manifestContent, $utf8NoBom)
+}
+
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$ExtZipPath = Join-Path $ExtDir "miniBot_Browser_Extension.zip"
+$StaticZipPath = Join-Path $RootDir "app\static\miniBot_Browser_Extension.zip"
+if (Test-Path $ExtZipPath) { Remove-Item $ExtZipPath -Force }
+
+$zipStream = [System.IO.File]::Open($ExtZipPath, [System.IO.FileMode]::Create)
+$zipArchive = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+try {
+    $files = Get-ChildItem -Path $ExtDir -Recurse -File | Where-Object { $_.Extension -ne ".zip" }
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($ExtDir.Length).TrimStart('\', '/').Replace('\', '/')
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zipArchive, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+} finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+}
+Copy-Item -Path $ExtZipPath -Destination $StaticZipPath -Force
+
+Write-Host "[1/3] 已同步更新 package.json / tauri.conf.json / Cargo.toml / extension/manifest.json 版本号为 $newVer，并生成 miniBot_Browser_Extension.zip" -ForegroundColor Green
 
 # 4. Git 提交并打 Tag
 git add .

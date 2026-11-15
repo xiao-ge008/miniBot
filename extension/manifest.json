@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "miniBot 网页助手",
-  "version": "1.0.1",
+  "version": "0.1.12",
   "description": "miniBot 浏览器深度联动插件：网页内容智能提取、AI 总结、图片悬浮采集、划词沉浸式助手与剪贴板协同。",
   "permissions": [
     "contextMenus",

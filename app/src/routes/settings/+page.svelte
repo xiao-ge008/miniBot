@@ -1141,6 +1141,15 @@
     }, delayMs);
   }
 
+  async function handleExportExtensionZip() {
+    try {
+      const savedPath = await ipc.appExportExtensionZip();
+      flashMsg(`✓ 浏览器插件 ZIP 已保存并打开: ${savedPath}`, 4200);
+    } catch (e: unknown) {
+      flashMsg(`✕ 导出浏览器插件失败: ${String(e)}`, 3500);
+    }
+  }
+
   onMount(() => {
     load();
     ipc.llmStatus().then((x) => (status = x));
@@ -2305,6 +2314,19 @@
                   📝 打开编辑器
                 </button>
               </div>
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">浏览器网页助手插件 (Chrome / Edge)</div>
+                  <div class="row-desc">一键导出 miniBot_Browser_Extension.zip 至下载目录，解压后在浏览器扩展页加载即可联动划词与网页入库</div>
+                </div>
+                <button
+                  type="button"
+                  class="btn"
+                  onclick={handleExportExtensionZip}
+                >
+                  📦 下载插件 ZIP
+                </button>
+              </div>
             </div>
           </section>
 
@@ -2539,6 +2561,18 @@
                 <span>屏蔽进程黑名单（每行一个进程名，例如 keepass.exe）</span>
                 <textarea rows="5" bind:value={blacklistText} onchange={save}></textarea>
               </label>
+
+              <div class="divider"></div>
+
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">浏览器网页助手插件 (Chrome / Edge)</div>
+                  <div class="row-desc">网页内沉浸式划词总结/翻译/入库，并自动与桌面端防冲突协同（导出 ZIP 后解压加载）</div>
+                </div>
+                <button type="button" class="btn" onclick={handleExportExtensionZip}>
+                  📦 下载插件 ZIP
+                </button>
+              </div>
             </div>
           </section>
 
@@ -2787,6 +2821,22 @@
                   </button>
                 </div>
               {/if}
+
+              <div class="divider"></div>
+
+              <div class="row-item">
+                <div class="row-meta">
+                  <div class="row-label">浏览器网页插件 (Chrome / Edge)</div>
+                  <div class="row-desc">导出内置最新版 miniBot_Browser_Extension.zip 到本机下载目录</div>
+                </div>
+                <button
+                  type="button"
+                  class="act-btn"
+                  onclick={handleExportExtensionZip}
+                >
+                  📦 下载插件 ZIP
+                </button>
+              </div>
 
               <div class="divider"></div>
 

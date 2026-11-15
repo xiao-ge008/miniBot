@@ -293,6 +293,7 @@ pub fn run() {
             commands::app_cancel_update_download,
             commands::app_install_update,
             commands::open_external_url,
+            commands::app_export_extension_zip,
             commands::recorder_start,
             commands::recorder_pause,
             commands::recorder_resume,

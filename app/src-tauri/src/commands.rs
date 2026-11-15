@@ -831,6 +831,22 @@ pub fn open_external_url(app: AppHandle, url: String) -> R<()> {
     app.opener().open_url(url, None::<&str>).map_err(e)
 }
 
+pub const EXTENSION_ZIP_BYTES: &[u8] = include_bytes!("../../../extension/miniBot_Browser_Extension.zip");
+
+#[tauri::command]
+pub fn app_export_extension_zip() -> R<String> {
+    let dir = dirs::download_dir()
+        .or_else(dirs::desktop_dir)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let zip_path = dir.join("miniBot_Browser_Extension.zip");
+    std::fs::write(&zip_path, EXTENSION_ZIP_BYTES)
+        .map_err(|err| format!("导出浏览器插件 ZIP 失败: {err}"))?;
+    let path_str = zip_path.to_string_lossy().to_string();
+    let _ = crate::kb::reveal_kb_file(&path_str);
+    Ok(path_str)
+}
+
 // ---------- 极简双端录屏 ----------
 
 #[tauri::command]

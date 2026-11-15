@@ -70,6 +70,7 @@ pub fn spawn(app: AppHandle) {
             .route("/v1/qr/decode", post(qr_decode))
             .route("/v1/qr/encode", post(qr_encode))
             .route("/v1/clip/suppress", post(clip_suppress))
+            .route("/v1/extension.zip", get(download_extension_zip))
             .route("/v1/kb/web", post(kb_save_web))
             .route("/v1/kb/image", post(kb_save_image))
             .route("/v1/kb/clip", post(kb_save_clip))
@@ -306,6 +307,18 @@ async fn clip_suppress(State(gw): State<Gw>, Json(body): Json<Value>) -> Respons
     }
     crate::wins::hide(&gw.app, "tip");
     Json(json!({ "ok": true, "suppressed_ms": ms })).into_response()
+}
+
+async fn download_extension_zip() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/zip")
+        .header(
+            "content-disposition",
+            "attachment; filename=\"miniBot_Browser_Extension.zip\"",
+        )
+        .body(axum::body::Body::from(crate::commands::EXTENSION_ZIP_BYTES))
+        .unwrap()
 }
 
 async fn kb_save_web(State(gw): State<Gw>, headers: HeaderMap, Json(body): Json<Value>) -> Response {

@@ -649,6 +649,7 @@ export const ipc = {
   appCancelUpdateDownload: () => invoke<void>('app_cancel_update_download'),
   appInstallUpdate: (installerPath: string) => invoke<void>('app_install_update', { installerPath }),
   openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
+  appExportExtensionZip: () => invoke<string>('app_export_extension_zip'),
 
   recorderStart: (args: RecordStartArgs) => invoke<RecorderStateInfo>('recorder_start', { args }),
   recorderPause: () => invoke<RecorderStateInfo>('recorder_pause'),

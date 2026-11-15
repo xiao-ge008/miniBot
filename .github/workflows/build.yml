@@ -138,11 +138,24 @@ jobs:
           rm -rf "$STAGE_DIR"
           ls -lh "$DMG_FILE"
 
+      - name: Prepare Browser Extension ZIP for Release
+        shell: node {0}
+        run: |
+          const fs = require('fs');
+          const ver = '${{ steps.get_version.outputs.version }}';
+          const src = 'extension/miniBot_Browser_Extension.zip';
+          const dst = `extension/miniBot_Browser_Extension_v${ver}.zip`;
+          if (fs.existsSync(src)) {
+            fs.copyFileSync(src, dst);
+          }
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.bundle_path }}
+          path: |
+            ${{ matrix.bundle_path }}
+            extension/miniBot_Browser_Extension*.zip
           if-no-files-found: error
 
       - name: Publish to GitHub Release
@@ -150,12 +163,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
-          name: miniBot ${{ steps.get_version.outputs.tag }} (Windows & macOS)
+          name: miniBot ${{ steps.get_version.outputs.tag }} (Windows & macOS & Browser Extension)
           body: |
-            ## miniBot ${{ steps.get_version.outputs.tag }} 官方安装包
+            ## miniBot ${{ steps.get_version.outputs.tag }} 官方安装包与浏览器插件
             - **Windows (x64)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_x64-setup.exe`
             - **macOS (Apple Silicon)**: 下载 `miniBot_${{ steps.get_version.outputs.version }}_aarch64.dmg`
-            - **客户端在线更新**: 已安装旧版本的用户可直接打开 **「miniBot 设置 -> 版本更新」** 点击 **「检查更新」** 一键自动下载并覆盖升级。
+            - **Chrome / Edge 浏览器网页插件**: 下载 `miniBot_Browser_Extension_v${{ steps.get_version.outputs.version }}.zip`（或固定文件名 `miniBot_Browser_Extension.zip`）
+              - **安装方式**: 解压 `.zip` 后，在浏览器打开 `chrome://extensions` 或 `edge://extensions` -> 开启右上角 **「开发者模式」** -> 点击左上角 **「加载已解压的扩展程序」** 选择解压后的文件夹即可（也可直接在桌面端「设置 -> 划词与复制 / 个人知识库」中一键导出插件 ZIP 包）。
+            - **客户端在线更新**: 已安装旧版本的用户可直接打开 **「miniBot 设置 -> 版本更新」** 点击 **「检测更新」** 一键自动下载并覆盖升级。
 
             ### 🍎 macOS 首次安装提示（若提示“已损坏，无法打开”）
             由于未接入 Apple 付费公证，浏览器直接下载 `.dmg` 会被 macOS 附加隔离标签。首次安装只需任选以下一种方式即可正常打开：
@@ -166,7 +181,10 @@ jobs:
                ```
 
             > 注：本安装包不包含本地 `llama` 引擎与 `.gguf` 模型文件；首次启动后可在「设置 -> 本地模型」中按需一键下载，或直接启用「模型 API」使用云端模型。
-          files: ${{ matrix.bundle_path }}
+          files: |
+            ${{ matrix.bundle_path }}
+            extension/miniBot_Browser_Extension.zip
+            extension/miniBot_Browser_Extension_v${{ steps.get_version.outputs.version }}.zip
           prerelease: false
           make_latest: true
         env:

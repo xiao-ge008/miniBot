@@ -621,6 +621,13 @@
     color: #fff;
   }
 
+  .title-bar { height: 46px; background: var(--bg-solid); padding-inline: 16px; }
+  .view-tabs { border-radius: 8px; padding: 3px; gap: 3px; }
+  .v-tab { min-height: 28px; padding-inline: 10px; }
+  .v-tab.active { color: var(--fg); box-shadow: none; }
+  .act-btn { min-height: 30px; border-radius: 8px; }
+  .editor-window { border-color: var(--border); }
+
   /* 主编辑区 */
   .main-body {
     flex: 1;

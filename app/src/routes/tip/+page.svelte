@@ -366,4 +366,7 @@
     color: var(--warn, #e69d22);
     white-space: nowrap;
   }
+  .bar { padding: 5px 8px; border-radius: 8px; box-shadow: var(--shadow); }
+  .row { gap: 3px; }
+  .item { border-radius: 7px; }
 </style>

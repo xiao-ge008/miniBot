@@ -660,4 +660,7 @@
   .status-msg.err {
     color: var(--danger);
   }
+  .bar { border-radius: 8px; padding: 6px 8px; box-shadow: var(--shadow); }
+  .row { gap: 4px; }
+  .item { border-radius: 6px; }
 </style>

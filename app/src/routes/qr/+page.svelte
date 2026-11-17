@@ -270,4 +270,10 @@
     max-width: 90%;
     word-break: break-all;
   }
+  .qr { padding: 16px; gap: 12px; }
+  .qr-head { min-height: 32px; }
+  .form { gap: 8px; }
+  .code { border-radius: 10px; }
+  .opts { gap: 12px; }
+  .btns { gap: 8px; }
 </style>

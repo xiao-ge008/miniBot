@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   // 极简无边框设置面板：
   // 1. 本地模型页：本机配置检查（GPU/显存/内存）+ 本地引擎管理（N卡CUDA/A卡&Intel Vulkan/Mac Metal/CPU）+ 智能模型下载（Q4M/Q2S，支持 hf-mirror）+ 修改目录自动迁移模型 + 折叠高级设置（默认 8K 上下文）
   // 2. 窗口互斥：从聊天窗打开设置时聊天窗自动隐藏，关闭设置窗时自动恢复聊天窗
@@ -26,6 +27,11 @@
   } from '$lib/core/types';
 
   const win = getCurrentWindow();
+
+  function returnToChat() {
+    if (win.label === 'launcher') void goto('/launcher');
+    else ipc.closePage();
+  }
 
   const TABS = ['模型', '个人知识库', '外观与常规', '全局热键', '划词与复制', 'OpenAI 网关', '历史清理', '版本更新'] as const;
 
@@ -1158,7 +1164,7 @@
   });
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && !recordingField && ipc.closePage()} />
+<svelte:window onkeydown={(e) => e.key === 'Escape' && !recordingField && returnToChat()} />
 
 <div class="page">
   <!-- 左侧极简导航栏 -->
@@ -1204,7 +1210,7 @@
         <button class="primary save-btn" onclick={save}>保存设置</button>
         <div class="win-sep"></div>
         <button class="win-ctrl" onclick={() => ipc.minimizeSelf()} title="最小化">─</button>
-        <button class="win-ctrl close" onclick={() => ipc.closePage()} title="关闭设置并返回聊天 (Esc)">✕</button>
+        <button class="win-ctrl close" onclick={returnToChat} title="返回聊天 (Esc)">✕</button>
       </div>
     </header>
 
@@ -2723,7 +2729,7 @@
               <div class="divider"></div>
 
               <div class="gpu-actions">
-                <button onclick={() => ipc.openPage('history', '划词与识图历史')}>查看划词/识图临时记录</button>
+                <button onclick={() => win.label === 'launcher' ? goto('/history') : ipc.openPage('history', '划词与识图历史')}>查看划词/识图临时记录</button>
                 <button
                   onclick={async () => {
                     if (confirm('确定清空全部划词与识图临时历史？（不影响主聊天窗的永久对话）')) {
@@ -4388,4 +4394,13 @@
     font-size: 12px;
     color: var(--danger);
   }
+  .page { background: var(--bg-solid); }
+  .sidebar { background: color-mix(in srgb, var(--panel) 72%, var(--bg-solid)); }
+  .nav-list { gap: 4px; padding: 12px 8px; }
+  .nav-btn { min-height: 36px; border-left: 2px solid transparent; }
+  .nav-btn.active { background: var(--panel-elevated); border-left-color: var(--accent-blue); box-shadow: none; }
+  .top-bar { height: 52px; }
+  .tab-title { font-size: 16px; font-weight: 500; }
+  .main-scroll { scrollbar-gutter: stable; }
+  .save-btn { min-height: 32px; }
 </style>

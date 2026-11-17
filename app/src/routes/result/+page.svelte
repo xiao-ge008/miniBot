@@ -55,30 +55,10 @@
         close();
       }
     });
-    // 失去焦点自动隐藏（未固定且打开超过 500ms）
-    const unF = win.onFocusChanged(({ payload: focused }) => {
-      if ((window as any).__mb_dialog_open) return;
-      if (focused) {
-        openedAt = Date.now();
-        return;
-      }
-      if (!pinned && Date.now() - openedAt > 500) {
-        setTimeout(async () => {
-          if ((window as any).__mb_dialog_open) return;
-          try {
-            const stillFocused = await win.isFocused();
-            if (!stillFocused && !pinned) close();
-          } catch {
-            if (!pinned) close();
-          }
-        }, 120);
-      }
-    });
     return () => {
       unP.then((f) => f());
       unS.then((f) => f());
       unO.then((f) => f());
-      unF.then((f) => f());
     };
   });
 
@@ -191,4 +171,8 @@
     padding: 16px;
     color: var(--fg-dim);
   }
+  .title { height: 40px; gap: 8px; padding: 4px 8px 4px 14px; }
+  .name { font-size: 13px; font-weight: 500; letter-spacing: 0; }
+  .icon { min-width: 30px; min-height: 28px; border-radius: 7px; }
+  .body { min-height: 0; }
 </style>

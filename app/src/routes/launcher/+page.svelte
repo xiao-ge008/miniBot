@@ -3098,4 +3098,22 @@
       transform: translateY(0) scale(1);
     }
   }
+  .sidebar { background: color-mix(in srgb, var(--panel) 72%, var(--bg-solid)); }
+  .new-chat-btn { height: 40px; border-radius: 8px; box-shadow: none; }
+  .session-list { gap: 4px; padding: 4px 8px 8px; }
+  .session-item { min-height: 36px; border: 1px solid transparent; }
+  .session-item.active { background: var(--panel-elevated); border-color: var(--border); }
+  .chat-header { height: 48px; }
+  .chat-title { font-size: 14px; font-weight: 500; }
+  .user-bubble { border-radius: 12px 12px 4px 12px; }
+  .chip-btn { border-radius: 8px; padding: 7px 11px; }
+  .kb-gallery-box { background: var(--panel); border-color: var(--border); border-radius: 8px; }
+  .kb-img-card { border-radius: 8px; box-shadow: none; }
+  .kb-img-card:hover { transform: none; box-shadow: none; border-color: var(--accent-blue); }
+  .kb-img-card:hover .kb-img-thumb { transform: none; }
+  .kb-toast { border-color: var(--border); box-shadow: var(--shadow); }
+  .window { background: var(--bg-solid); }
+  .side-bottom { justify-content: flex-start; gap: 8px; min-height: 40px; }
+  .side-bottom > button, .side-bottom > .spacer { display: none; }
+  .side-status-label { color: var(--fg-dim); font-size: 11px; }
 </style>

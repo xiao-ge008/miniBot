@@ -77,14 +77,25 @@ mod imp {
             return;
         }
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, LoadCursorW, SetCursor, SetCursorPos, SetWindowLongPtrW, GWL_EXSTYLE,
-            IDC_CROSS, WS_EX_TOOLWINDOW,
+            GetWindowLongPtrW, LoadCursorW, SetCursor, SetCursorPos, SetWindowLongPtrW, SetWindowPos,
+            GWL_EXSTYLE, HWND_TOP, IDC_CROSS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, WS_EX_TOOLWINDOW,
         };
         unsafe {
             let h = HWND(hwnd as *mut _);
             let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
             if (ex & WS_EX_TOOLWINDOW.0 as isize) == 0 {
                 SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW.0 as isize);
+                // Flush the updated extended style through the window manager/DWM.
+                let _ = SetWindowPos(
+                    h,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
             }
         }
         focus_hwnd(hwnd);

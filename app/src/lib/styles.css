@@ -1,20 +1,20 @@
-/* miniBot 全局极简样式：支持白天 / 黑夜 / 跟随系统主题 + 自定义字体与字号 */
+/* miniBot 中性界面基础：支持白天 / 黑夜 / 跟随系统主题与用户字体 */
 :root,
 :root[data-theme='light'] {
   --app-font: 'Inter', 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif;
   --app-font-size: 14px;
   --app-line-height: 1.68;
-  --bg: rgba(255, 255, 255, 0.96);
+  --bg: #fafafa;
   --bg-solid: #ffffff;
   --panel: #f4f4f5;
   --panel-elevated: #ffffff;
-  --fg: #09090b;
-  --fg-dim: #71717a;
-  --border: rgba(24, 24, 27, 0.1);
-  --accent: #18181b;
-  --accent-blue: #2563eb;
+  --fg: #171717;
+  --fg-dim: #626267;
+  --border: rgba(24, 24, 27, 0.09);
+  --accent: #171717;
+  --accent-blue: #245fbd;
   --accent-fg: #fafafa;
-  --hover: rgba(24, 24, 27, 0.05);
+  --hover: rgba(24, 24, 27, 0.045);
   --user-bubble-bg: #18181b;
   --user-bubble-fg: #fafafa;
   --danger: #ef4444;
@@ -22,9 +22,9 @@
   --warn: #f59e0b;
   --ok: #10b981;
   --radius: 8px;
-  --blur: blur(16px);
-  --transition: 0.15s cubic-bezier(0.25, 1, 0.5, 1);
-  --shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.05);
+  --blur: blur(12px);
+  --transition: 0.15s cubic-bezier(0.22, 1, 0.36, 1);
+  --shadow: 0 6px 20px -6px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.06);
   color-scheme: light;
   font-family: var(--app-font);
   font-size: var(--app-font-size);
@@ -32,39 +32,39 @@
 }
 
 :root[data-theme='dark'] {
-  --bg: rgba(18, 18, 21, 0.96);
-  --bg-solid: #121215;
-  --panel: #1a1a1f;
-  --panel-elevated: #232329;
-  --fg: #f4f4f5;
-  --fg-dim: #9ca3af;
+  --bg: #141415;
+  --bg-solid: #141415;
+  --panel: #1b1b1d;
+  --panel-elevated: #242426;
+  --fg: #ededed;
+  --fg-dim: #a1a1a6;
   --border: rgba(255, 255, 255, 0.08);
-  --accent: #f4f4f5;
-  --accent-blue: #3b82f6;
-  --accent-fg: #09090b;
-  --hover: rgba(255, 255, 255, 0.06);
-  --user-bubble-bg: #27272e;
-  --user-bubble-fg: #f4f4f5;
-  --shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --accent: #ededed;
+  --accent-blue: #78a9ef;
+  --accent-fg: #171717;
+  --hover: rgba(255, 255, 255, 0.055);
+  --user-bubble-bg: #252527;
+  --user-bubble-fg: #ededed;
+  --shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.42);
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --bg: rgba(18, 18, 21, 0.96);
-    --bg-solid: #121215;
-    --panel: #1a1a1f;
-    --panel-elevated: #232329;
-    --fg: #f4f4f5;
-    --fg-dim: #9ca3af;
+    --bg: #141415;
+    --bg-solid: #141415;
+    --panel: #1b1b1d;
+    --panel-elevated: #242426;
+    --fg: #ededed;
+    --fg-dim: #a1a1a6;
     --border: rgba(255, 255, 255, 0.08);
-    --accent: #f4f4f5;
-    --accent-blue: #3b82f6;
-    --accent-fg: #09090b;
-    --hover: rgba(255, 255, 255, 0.06);
-    --user-bubble-bg: #27272e;
-    --user-bubble-fg: #f4f4f5;
-    --shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --accent: #ededed;
+    --accent-blue: #78a9ef;
+    --accent-fg: #171717;
+    --hover: rgba(255, 255, 255, 0.055);
+    --user-bubble-bg: #252527;
+    --user-bubble-fg: #ededed;
+    --shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.42);
     color-scheme: dark;
   }
 }
@@ -103,11 +103,11 @@ button {
   color: inherit;
   border: 1px solid var(--border);
   background: var(--panel);
-  border-radius: 6px;
-  padding: 4px 10px;
+  border-radius: 8px;
+  padding: 5px 10px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background var(--transition), transform var(--transition), border-color var(--transition), opacity var(--transition);
+  transition: background-color var(--transition), transform var(--transition), border-color var(--transition), color var(--transition), opacity var(--transition);
 }
 button:hover {
   background: var(--hover);
@@ -136,6 +136,13 @@ button:disabled {
   cursor: default;
 }
 
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
 input,
 textarea,
 select {
@@ -143,8 +150,8 @@ select {
   color: inherit;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 9px;
+  border-radius: 8px;
+  padding: 7px 10px;
   outline: none;
   transition: border-color var(--transition), background var(--transition);
 }
@@ -156,6 +163,7 @@ select:focus {
 textarea {
   resize: vertical;
   user-select: text;
+  line-height: 1.5;
 }
 
 .selectable {
@@ -163,12 +171,14 @@ textarea {
 }
 
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;

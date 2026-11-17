@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   // 历史记录（保留天数见设置，默认 30 天自动清理）
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -8,6 +9,11 @@
   import type { HistoryEntry } from '$lib/core/types';
 
   const win = getCurrentWindow();
+
+  function returnToChat() {
+    if (win.label === 'launcher') void goto('/launcher');
+    else ipc.closePage();
+  }
 
   let q = $state('');
   let list = $state<HistoryEntry[]>([]);
@@ -41,7 +47,7 @@
   onMount(search);
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && ipc.closePage()} />
+<svelte:window onkeydown={(e) => e.key === 'Escape' && returnToChat()} />
 
 <div class="page">
   <aside>
@@ -83,7 +89,7 @@
         <span class="sp" data-tauri-drag-region></span>
       {/if}
       <button class="win-ctrl" onclick={() => ipc.minimizeSelf()} title="最小化">─</button>
-      <button class="win-ctrl close" onclick={() => ipc.closePage()} title="关闭 (Esc)">✕</button>
+      <button class="win-ctrl close" onclick={returnToChat} title="返回聊天 (Esc)">✕</button>
     </div>
 
     <div class="detail-body">
@@ -224,4 +230,12 @@
   .pad {
     padding: 16px;
   }
+  aside { width: 320px; background: color-mix(in srgb, var(--panel) 72%, var(--bg-solid)); }
+  .side-head { height: 52px; padding: 0 16px; }
+  .search { margin: 12px; }
+  .item { min-height: 64px; padding: 10px 14px; border-left: 2px solid transparent; }
+  .item.sel { background: var(--panel-elevated); border-left-color: var(--accent-blue); }
+  .top-bar { height: 52px; }
+  .detail-body { padding: 20px 24px; }
+  pre { line-height: 1.6; border: 1px solid var(--border); }
 </style>

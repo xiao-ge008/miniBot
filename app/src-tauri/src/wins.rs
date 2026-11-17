@@ -559,6 +559,13 @@ pub fn open_result(app: &AppHandle, p: Payload) {
 pub fn open_launcher(app: &AppHandle) {
     run_win_task(app, move |app2| {
         let Some(w) = get_or_build(&app2, "launcher") else { return };
+        if let Ok(mut url) = w.url() {
+            if url.path() != "/launcher" {
+                url.set_path("/launcher");
+                let _ = w.navigate(url);
+            }
+        }
+        let _ = w.set_title("miniBot · AI 聊天");
         let hwnd = crate::winutil::foreground_hwnd();
         let src = crate::winutil::foreground_process();
         let p = Payload::text(String::new(), Origin::Launcher, src, hwnd);
@@ -678,6 +685,21 @@ pub fn open_page(app: &AppHandle, route: &str, title: &str) {
     let route = route.to_string();
     let title = title.to_string();
     run_win_task(app, move |app2| {
+        if matches!(route.as_str(), "settings" | "history") {
+            let Some(w) = get_or_build(&app2, "launcher") else { return };
+            if let Ok(mut url) = w.url() {
+                url.set_path(&format!("/{route}"));
+                let _ = w.navigate(url);
+            }
+            let window_title = format!("miniBot · {title}");
+            let _ = w.set_title(&window_title);
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+            let h = hwnd_of(&w);
+            crate::winutil::focus_hwnd(h);
+            return;
+        }
         if let Some(chat_win) = app2.get_webview_window("launcher") {
             if chat_win.is_visible().unwrap_or(false) {
                 RETURN_TO_CHAT.store(true, Ordering::SeqCst);

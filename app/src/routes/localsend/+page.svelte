@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   // LocalSend 局域网文件 / 文本 / 截图快传独立浮窗（与主界面极简黑白灰风格统一）
   // 兼容所有安装了官方 LocalSend (https://github.com/localsend/localsend) 的客户端（iOS / Android / Windows / macOS / Linux）
   import { onMount } from 'svelte';
@@ -385,6 +386,10 @@
   }
 
   function closeWindow() {
+    if (win.label === 'launcher') {
+      void goto('/launcher');
+      return;
+    }
     ipc.hideSelf();
     win.hide().catch(() => {});
   }
@@ -1544,4 +1549,10 @@
     z-index: 99;
     max-width: 90%;
   }
+  .ls-header { height: 48px; padding-inline: 16px; }
+  .brand-badge { border-radius: 8px; }
+  .ls-body { gap: 16px; padding: 16px; }
+  .panel { border-radius: 8px; padding: 16px; gap: 12px; }
+  .act-btn { min-height: 32px; border-radius: 8px; }
+  .ls-toast { border: 1px solid var(--border); }
 </style>

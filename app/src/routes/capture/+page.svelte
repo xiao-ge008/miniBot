@@ -2016,4 +2016,8 @@
     box-shadow: var(--shadow);
     pointer-events: none;
   }
+  .bar { border-radius: 8px; padding: 6px 8px; }
+  .row { gap: 4px; }
+  .props { margin-top: 8px; padding-top: 8px; gap: 8px; }
+  .tb { border-radius: 6px; }
 </style>

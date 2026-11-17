@@ -567,56 +567,19 @@
     aiPanel.style.display = "flex";
 
     try {
-      const resp = await fetch(`${settings.serverUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(settings.apiKey ? { "Authorization": `Bearer ${settings.apiKey}` } : {})
-        },
-        body: JSON.stringify({
-          model: "minibot-2b",
-          messages: [
-            { role: "system", content: "你是一个智能高效的阅读与知识提取助手，用清晰优美的排版回答。" },
-            { role: "user", content: prompt }
-          ],
-          stream: true
-        })
+      const resp = await safePost("/v1/chat/completions", {
+        model: "minibot-2b",
+        messages: [
+          { role: "system", content: "你是一个智能高效的阅读与知识提取助手，用清晰优美的排版回答。" },
+          { role: "user", content: prompt }
+        ],
+        stream: false
       });
 
-      if (!resp.ok) {
-        bodyEl.textContent = `⚠️ 请求失败 (HTTP ${resp.status})，请检查 App 设置与模型状态。`;
-        return;
-      }
-
-      bodyEl.textContent = "";
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      let buffer = "";
-
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop();
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith("data: ")) {
-              const dataStr = trimmed.slice(6);
-              if (dataStr === "[DONE]") continue;
-              try {
-                const parsed = JSON.parse(dataStr);
-                const delta = parsed.choices?.[0]?.delta?.content || "";
-                bodyEl.textContent += delta;
-                bodyEl.scrollTop = bodyEl.scrollHeight;
-              } catch (_) {}
-            }
-          }
-        }
-      }
+      const answer = resp?.choices?.[0]?.message?.content;
+      bodyEl.textContent = typeof answer === "string" && answer
+        ? answer
+        : "⚠️ 模型未返回可显示的内容，请检查模型状态后重试。";
     } catch (err) {
       bodyEl.textContent = "❌ 连接本地大模型失败: " + err.message + "\n\n请确保 miniBot 桌面 App 正在运行。";
     }

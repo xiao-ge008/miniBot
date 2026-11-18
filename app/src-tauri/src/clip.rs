@@ -252,6 +252,7 @@ impl ClipWatcher {
     #[cfg(windows)]
     fn spawn_mouse_selection(app: AppHandle) {
         std::thread::spawn(move || {
+            crate::winutil::set_thread_dpi_aware();
             let mut was_down = false;
             let mut down_pos = (0i32, 0i32);
             let mut down_ms = 0u64;

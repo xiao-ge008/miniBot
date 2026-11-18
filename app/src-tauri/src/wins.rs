@@ -232,7 +232,6 @@ pub fn get_or_build(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
 pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
     for (name, f) in [
         ("launcher", build_launcher as fn(&AppHandle) -> tauri::Result<WebviewWindow>),
-        ("capture", build_capture),
         ("result", build_result),
         ("tip", build_tip),
     ] {
@@ -240,6 +239,11 @@ pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
             Ok(_) => crate::log_msg(app, format!("[setup] 预创建 {name} 成功")),
             Err(e) => crate::log_msg(app, format!("[setup] 预创建 {name} 失败：{e}")),
         }
+    }
+    #[cfg(not(target_os = "macos"))]
+    match build_capture(app) {
+        Ok(_) => crate::log_msg(app, "[setup] 预创建 capture 成功"),
+        Err(e) => crate::log_msg(app, format!("[setup] 预创建 capture 失败：{e}")),
     }
     Ok(())
 }

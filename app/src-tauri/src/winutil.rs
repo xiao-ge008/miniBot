@@ -14,6 +14,9 @@ mod imp {
         KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LMENU, VK_LWIN, VK_MENU, VK_RMENU, VK_RWIN,
         VK_SHIFT,
     };
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
     };
@@ -183,6 +186,12 @@ mod imp {
             let _ = GetCursorPos(&mut p);
         }
         (p.x, p.y)
+    }
+
+    pub fn set_thread_dpi_aware() {
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
     }
 
     /// 判断当前鼠标光标是否为文本选择光标（IDC_IBEAM），用于精准识别「鼠标划词」而不误触普通拖拽

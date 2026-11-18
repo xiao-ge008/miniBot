@@ -35,6 +35,15 @@
     ipc.hideSelf();
   }
 
+  function startWindowDrag(event: MouseEvent) {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('button, a, input, textarea, select, [role="button"]')) {
+      return;
+    }
+    void win.startDragging().catch(() => {});
+  }
+
   const DEFAULT_FONT = "'Inter', 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif";
 
   function applyUi(s?: Settings | null) {
@@ -62,7 +71,8 @@
 
 {#if isMainPage}
   <div class="main-shell">
-    <header class="main-topbar">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <header class="main-topbar" onmousedown={startWindowDrag}>
       <span class="topbar-space" aria-hidden="true"></span>
       <nav class="main-tabs" aria-label="主导航">
         {#each tabs as tab (tab.href)}

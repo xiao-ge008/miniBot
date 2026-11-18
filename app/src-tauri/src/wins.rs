@@ -228,24 +228,15 @@ pub fn get_or_build(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
     r.map_err(|e| crate::log_msg(app, format!("[wins] 创建 {label} 失败：{e}"))).ok()
 }
 
-/// 启动时预创建常用浮窗（隐藏），按热键或触发动作时只需显示，速度最快且避免运行时建窗死锁
-pub fn precreate(app: &AppHandle) -> tauri::Result<()> {
-    for (name, f) in [
-        ("launcher", build_launcher as fn(&AppHandle) -> tauri::Result<WebviewWindow>),
-        ("result", build_result),
-        ("tip", build_tip),
-    ] {
-        match f(app) {
-            Ok(_) => crate::log_msg(app, format!("[setup] 预创建 {name} 成功")),
-            Err(e) => crate::log_msg(app, format!("[setup] 预创建 {name} 失败：{e}")),
+/// 普通启动时预热高频 Tip；其他窗口由首次使用路径按需创建。
+pub fn prewarm_tip(app: &AppHandle) {
+    run_win_task(app, move |app| {
+        if app.get_webview_window("tip").is_none() {
+            if let Err(e) = build_tip(&app) {
+                crate::log_msg(&app, format!("[setup] Tip window prewarm failed: {e}"));
+            }
         }
-    }
-    #[cfg(not(target_os = "macos"))]
-    match build_capture(app) {
-        Ok(_) => crate::log_msg(app, "[setup] 预创建 capture 成功"),
-        Err(e) => crate::log_msg(app, format!("[setup] 预创建 capture 失败：{e}")),
-    }
-    Ok(())
+    });
 }
 
 /// 把窗口放到光标附近并限制在当前显示器内（兼容 Windows 物理像素与 macOS Retina 逻辑点坐标）

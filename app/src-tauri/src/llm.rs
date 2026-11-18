@@ -197,6 +197,7 @@ impl Drop for ActiveGuard {
 pub struct LlmManager {
     child: tokio::sync::Mutex<Option<Child>>,
     load_lock: tokio::sync::Mutex<()>,
+    idle_release_lock: tokio::sync::Mutex<()>,
     status: Mutex<Option<Status>>,
     last_used: Mutex<Option<Instant>>,
     active: AtomicUsize,
@@ -495,6 +496,7 @@ impl LlmManager {
                 tick += 1;
                 let st = app.state::<crate::AppState>();
                 let mgr = &st.llm;
+                crate::kb::release_laya_if_idle();
                 if mgr.status() != Status::Ready {
                     continue;
                 }
@@ -513,8 +515,15 @@ impl LlmManager {
                 }
                 let idle = mgr.last_used.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
                 if mgr.active.load(Ordering::SeqCst) == 0 && idle >= settings.llm.idle_secs {
-                    mgr.release(&app, Status::Released, "闲置自动释放").await;
-                    continue;
+                    let _idle_guard = mgr.idle_release_lock.lock().await;
+                    let still_idle = mgr.status() == Status::Ready
+                        && mgr.active.load(Ordering::SeqCst) == 0
+                        && mgr.last_used.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0)
+                            >= settings.llm.idle_secs;
+                    if still_idle {
+                        mgr.release(&app, Status::Released, "闲置自动释放").await;
+                        continue;
+                    }
                 }
                 if tick % 5 == 0 {
                     crate::tray::refresh(&app);
@@ -531,10 +540,17 @@ impl LlmManager {
 
     /// 外部调用（网关）占用模型：持有期间不会被闲置释放
     pub async fn acquire(self: &Arc<Self>, app: &AppHandle, force: bool) -> Result<ActiveGuard, LlmError> {
-        self.ensure_ready(app, force).await?;
+        let idle_guard = self.idle_release_lock.lock().await;
         self.active.fetch_add(1, Ordering::SeqCst);
         self.touch();
-        Ok(ActiveGuard(self.clone()))
+        drop(idle_guard);
+
+        let active_guard = ActiveGuard(self.clone());
+        if let Err(error) = self.ensure_ready(app, force).await {
+            drop(active_guard);
+            return Err(error);
+        }
+        Ok(active_guard)
     }
 
     /// 流式对话。messages 为 OpenAI 格式（可含 image_url 的 data URI）
@@ -548,7 +564,7 @@ impl LlmManager {
 
     /// 供后端静默调用大模型完成推理（如后台知识库队列），不绑定窗口流式通道
     pub async fn chat_headless(
-        &self,
+        self: &Arc<Self>,
         app: &AppHandle,
         messages: serde_json::Value,
         params: serde_json::Value,
@@ -571,19 +587,16 @@ impl LlmManager {
             return res;
         }
 
-        self.ensure_ready(app, false).await?;
+        let _active = self.acquire(app, false).await?;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.lock().unwrap().insert(id.clone(), cancel.clone());
-        self.active.fetch_add(1, Ordering::SeqCst);
         let res = self.chat_inner(app, messages, params, &cancel, None).await;
-        self.active.fetch_sub(1, Ordering::SeqCst);
         self.cancels.lock().unwrap().remove(&id);
-        self.touch();
         res
     }
 
     pub async fn chat(
-        &self,
+        self: &Arc<Self>,
         app: &AppHandle,
         id: String,
         messages: serde_json::Value,
@@ -606,14 +619,11 @@ impl LlmManager {
         if self.status() != Status::Ready {
             let _ = on.send(ChatEvent::Loading);
         }
-        self.ensure_ready(app, force).await?;
+        let _active = self.acquire(app, force).await?;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.lock().unwrap().insert(id.clone(), cancel.clone());
-        self.active.fetch_add(1, Ordering::SeqCst);
         let res = self.chat_inner(app, messages, params, &cancel, Some(&on)).await;
-        self.active.fetch_sub(1, Ordering::SeqCst);
         self.cancels.lock().unwrap().remove(&id);
-        self.touch();
         res
     }
 

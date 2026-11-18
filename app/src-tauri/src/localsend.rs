@@ -614,10 +614,9 @@ pub fn spawn_daemon() {
             let _ = run_multicast_listener().await;
         });
 
-        // 3. 启动后主动在每个物理网卡上广播一次并向 ARP 活跃设备注册本机
+        // 启动后只公告本机；完整设备扫描延迟到用户打开快传页时执行。
         tokio::time::sleep(Duration::from_millis(600)).await;
         let _ = broadcast_udp_announcement().await;
-        let _ = scan_peers(Vec::new()).await;
     });
 }
 

@@ -36,7 +36,7 @@ pub struct ModelParams {
     pub kv_quant: String,
     /// 默认思考等级："off"（默认） | "low" | "medium" | "high" | "max"
     pub reasoning_effort: String,
-    /// 闲置多少秒后自动释放显存（默认 180 秒）
+    /// 闲置多少秒后自动释放显存（默认 30 秒）
     pub idle_secs: u64,
     /// 额外启动参数（如 --threads 8）
     pub extra_args: String,
@@ -56,7 +56,7 @@ impl Default for ModelParams {
             ngl: 99,
             kv_quant: "q8_0".into(),
             reasoning_effort: "off".into(),
-            idle_secs: 180,
+            idle_secs: 30,
             extra_args: String::new(),
         }
     }
@@ -171,7 +171,7 @@ impl Default for LlmSettings {
             ngl: 99,
             kv_quant: "q8_0".into(),
             reasoning_effort: "off".into(),
-            idle_secs: 180,
+            idle_secs: 30,
             required_vram_mb: 2400,
             extra_args: String::new(),
             model_params: std::collections::HashMap::new(),
@@ -428,6 +428,7 @@ impl SettingsStore {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        migrate_legacy_idle_defaults(&mut inner);
         let def_llm = LlmSettings::default();
         if inner.llm.server_path.trim().is_empty()
             || (!cfg!(windows) && inner.llm.server_path.to_lowercase().ends_with(".exe"))
@@ -485,5 +486,49 @@ impl SettingsStore {
         let s = serde_json::to_string_pretty(&*self.inner.read().unwrap())?;
         std::fs::write(&self.path, s)?;
         Ok(())
+    }
+}
+
+fn migrate_legacy_idle_defaults(settings: &mut Settings) {
+    const OLD_DEFAULT: u64 = 180;
+    const NEW_DEFAULT: u64 = 30;
+
+    if settings.llm.idle_secs == OLD_DEFAULT {
+        settings.llm.idle_secs = NEW_DEFAULT;
+    }
+    for params in settings.llm.model_params.values_mut() {
+        if params.idle_secs == OLD_DEFAULT {
+            params.idle_secs = NEW_DEFAULT;
+        }
+    }
+    for model in &mut settings.llm.custom_models {
+        if model.params.idle_secs == OLD_DEFAULT {
+            model.params.idle_secs = NEW_DEFAULT;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_previous_idle_default_and_preserves_custom_timeouts() {
+        let mut settings = Settings::default();
+        settings.llm.idle_secs = 180;
+        settings.llm.model_params.insert(
+            "q4m".into(),
+            ModelParams { idle_secs: 180, ..ModelParams::default() },
+        );
+        settings.llm.model_params.insert(
+            "q2s".into(),
+            ModelParams { idle_secs: 60, ..ModelParams::default() },
+        );
+
+        migrate_legacy_idle_defaults(&mut settings);
+
+        assert_eq!(settings.llm.idle_secs, 30);
+        assert_eq!(settings.llm.model_params["q4m"].idle_secs, 30);
+        assert_eq!(settings.llm.model_params["q2s"].idle_secs, 60);
     }
 }

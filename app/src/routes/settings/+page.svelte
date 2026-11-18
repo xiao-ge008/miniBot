@@ -928,7 +928,7 @@
         ngl: Number(m.params.ngl ?? 99),
         kv_quant: m.params.kv_quant || 'q8_0',
         reasoning_effort: (m.params.reasoning_effort || 'off') as ModelParams['reasoning_effort'],
-        idle_secs: Math.max(30, Number(m.params.idle_secs) || 180),
+        idle_secs: Math.max(30, Number(m.params.idle_secs) || 30),
         extra_args: (m.params.extra_args || '').trim(),
       };
       overview = await ipc.engineUpdateModelParams(m.id, cleanParams);
@@ -1024,7 +1024,7 @@
           ngl: existingCard?.params?.ngl ?? 99,
           kv_quant: existingCard?.params?.kv_quant || 'q8_0',
           reasoning_effort: customForm.reasoning_effort || 'off',
-          idle_secs: existingCard?.params?.idle_secs || 180,
+          idle_secs: existingCard?.params?.idle_secs || 30,
           extra_args: existingCard?.params?.extra_args || '',
         },
       };

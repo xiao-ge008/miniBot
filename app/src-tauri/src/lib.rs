@@ -153,11 +153,6 @@ pub fn run() {
             });
 
             tray::setup(&handle)?;
-            winutil::refresh_shell_icon_cache();
-            // 预创建失败不致命：窗口会在首次使用时按需创建
-            if let Err(e) = wins::precreate(&handle) {
-                eprintln!("[setup] 预创建窗口失败：{e}");
-            }
             hotkeys::register(&handle);
             llm::LlmManager::spawn_watchdog(handle.clone());
             handle.state::<AppState>().kb_queue.spawn_worker(handle.clone());
@@ -176,6 +171,13 @@ pub fn run() {
             let edit_target = extract_edit_path(&cli_args);
             let ls_paths = localsend::extract_cli_paths(&cli_args);
             let is_autostart = cli_args.iter().any(|a| a == "--autostart" || a == "--silent");
+            if !is_autostart {
+                winutil::refresh_shell_icon_cache();
+            }
+            let opens_launcher = edit_target.is_none() && ls_paths.is_empty() && !is_autostart;
+            if opens_launcher {
+                wins::prewarm_tip(&handle);
+            }
             if let Some(target) = edit_target {
                 wins::open_doc_editor(&handle, Some(target), None);
             } else if !ls_paths.is_empty() {

@@ -92,6 +92,32 @@ fn is_self_or_blacklisted(fg: &str, blacklist: &[String]) -> bool {
     })
 }
 
+pub fn should_show_text_tip(text: &str, min_chars: usize, max_chars: usize) -> bool {
+    let trimmed = text.trim();
+    let char_count = trimmed.chars().count();
+    if char_count < min_chars || char_count > max_chars || trimmed.is_empty() {
+        return false;
+    }
+
+    if kind_of_text(trimmed) != PayloadKind::Text {
+        return true;
+    }
+
+    let mut meaningful_count = 0usize;
+    let mut first_meaningful = None;
+    let mut all_meaningful_match = true;
+    for ch in trimmed.chars().filter(|ch| ch.is_alphanumeric()) {
+        meaningful_count += 1;
+        match first_meaningful {
+            Some(first) if first != ch => all_meaningful_match = false,
+            None => first_meaningful = Some(ch),
+            _ => {}
+        }
+    }
+
+    meaningful_count >= 4 && !(meaningful_count <= 8 && all_meaningful_match)
+}
+
 impl ClipWatcher {
     pub fn pause_for(&self, secs: u64) {
         self.paused_until.store(if secs == 0 { 0 } else { now() + secs }, Ordering::SeqCst);
@@ -199,7 +225,7 @@ impl ClipWatcher {
                     }
                     let t = text.trim();
                     let n = t.chars().count();
-                    if n < tip.min_chars || n > tip.max_chars {
+                    if !should_show_text_tip(t, tip.min_chars, tip.max_chars) {
                         continue;
                     }
                     {
@@ -340,7 +366,7 @@ impl ClipWatcher {
                         }
                         let t = text.trim();
                         let n = t.chars().count();
-                        if n < tip.min_chars || n > tip.max_chars {
+                        if !should_show_text_tip(t, tip.min_chars, tip.max_chars) {
                             continue;
                         }
                         st.clip.record_last_text(t);
@@ -374,6 +400,37 @@ pub fn kind_of_text(t: &str) -> PayloadKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_short_or_low_information_text_is_filtered() {
+        assert!(!should_show_text_tip("ab", 2, 20));
+        assert!(!should_show_text_tip("\u{4f60}\u{597d}", 2, 20));
+        assert!(!should_show_text_tip("!!!", 2, 20));
+        assert!(!should_show_text_tip("\u{54c8}\u{54c8}\u{54c8}\u{54c8}", 2, 20));
+        assert!(!should_show_text_tip("aaaa", 2, 20));
+    }
+
+    #[test]
+    fn test_meaningful_text_and_structured_short_text_are_kept() {
+        assert!(should_show_text_tip(
+            "\u{8fd9}\u{662f}\u{4e00}\u{4e2a}\u{6709}\u{6548}\u{7684}\u{77ed}\u{53e5}",
+            2,
+            20
+        ));
+        assert!(should_show_text_tip("abcd", 2, 20));
+        assert!(should_show_text_tip("https://a.co", 2, 20));
+        assert!(should_show_text_tip("#fff", 2, 20));
+    }
+
+    #[test]
+    fn test_text_tip_filter_respects_configured_length_limits() {
+        assert!(!should_show_text_tip(
+            "\u{8fd9}\u{662f}\u{4e00}\u{4e2a}\u{6709}\u{6548}\u{7684}\u{77ed}\u{53e5}",
+            2,
+            4
+        ));
+        assert!(!should_show_text_tip("abcd", 5, 20));
+    }
 
     #[test]
     fn test_ext_suppress_isolated_from_internal_suppress() {

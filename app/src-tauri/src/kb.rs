@@ -1080,9 +1080,36 @@ struct LayaDaemon {
 
 static LAYA_DAEMON: std::sync::OnceLock<std::sync::Mutex<Option<LayaDaemon>>> =
     std::sync::OnceLock::new();
+static LAYA_LAST_USED: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+const LAYA_IDLE_RELEASE_SECS: u64 = 30;
 
 fn laya_daemon_slot() -> &'static std::sync::Mutex<Option<LayaDaemon>> {
     LAYA_DAEMON.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn laya_last_used() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    LAYA_LAST_USED.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn release_laya_if_idle() {
+    let Ok(mut daemon) = laya_daemon_slot().try_lock() else {
+        return;
+    };
+    let Ok(mut last_used) = laya_last_used().try_lock() else {
+        return;
+    };
+    let idle = last_used
+        .as_ref()
+        .is_some_and(|t| t.elapsed().as_secs() >= LAYA_IDLE_RELEASE_SECS);
+    if idle {
+        if let Some(mut d) = daemon.take() {
+            let _ = d.child.kill();
+            let _ = d.child.wait();
+        }
+        *last_used = None;
+    }
 }
 
 pub fn stop_laya_daemon() {
@@ -1091,6 +1118,9 @@ pub fn stop_laya_daemon() {
             let _ = d.child.kill();
             let _ = d.child.wait();
         }
+    }
+    if let Ok(mut last_used) = laya_last_used().lock() {
+        *last_used = None;
     }
 }
 
@@ -1220,6 +1250,9 @@ pub fn laya_rerank_hits(raw_query: &str, hits: &mut [KbSearchHit]) -> Option<(us
     }
 
     let daemon = guard.as_mut()?;
+    if let Ok(mut last_used) = laya_last_used().lock() {
+        *last_used = Some(std::time::Instant::now());
+    }
     let top_n = hits.len().min(8);
     let mut scored_count = 0usize;
 
@@ -1254,6 +1287,10 @@ pub fn laya_rerank_hits(raw_query: &str, hits: &mut [KbSearchHit]) -> Option<(us
             }
             break;
         }
+    }
+
+    if let Ok(mut last_used) = laya_last_used().lock() {
+        *last_used = Some(std::time::Instant::now());
     }
 
     if scored_count > 0 {

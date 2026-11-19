@@ -940,6 +940,15 @@
     win.hide().catch(() => {});
   }
 
+  // macOS 上无边框窗口使用原生拖动，避免 WebView 子节点吞掉 CSS 拖动命中。
+  function startWindowDrag(event: MouseEvent) {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('button, a, input, textarea, select, [role="button"]')) return;
+    event.preventDefault();
+    void win.startDragging().catch(() => {});
+  }
+
   function fmtDate(ts: number): string {
     const d = new Date(ts * 1000);
     const now = new Date();
@@ -962,9 +971,14 @@
 
   onMount(() => {
     openedAt = Date.now();
-    syncModelReasoningEffort();
-    loadSessions(true);
-    checkUpdateSilent(true);
+    void syncModelReasoningEffort();
+    void loadSessions(true).catch((error: unknown) => {
+      console.error('加载聊天会话失败', error);
+      sessions = [];
+      messages = [];
+      errorMsg = '聊天记录加载失败，可以直接新建对话重试';
+    });
+    void checkUpdateSilent(true);
     ipc.getSettings().then((s) => {
       enableKnowledgeSearch = s.knowledge?.auto_search ?? false;
     }).catch(() => {});
@@ -972,8 +986,8 @@
       openedAt = Date.now();
       win.setAlwaysOnTop(pinned).catch(() => {});
       syncModelReasoningEffort();
-      loadSessions(false);
-      checkUpdateSilent(false);
+      void loadSessions(false).catch((error: unknown) => console.error('刷新聊天会话失败', error));
+      void checkUpdateSilent(false);
       textareaEl?.focus();
     });
     const unC = onChatCapture((data) => {
@@ -1001,7 +1015,7 @@
         }, 250);
       }
     });
-    ipc.llmStatus().then((s) => (status = s));
+    ipc.llmStatus().then((s) => (status = s)).catch((error: unknown) => console.error('读取模型状态失败', error));
     const applyKbQueue = (q: KbQueueStatus, isInit = false) => {
       if (!isInit) {
         if (q.completed_count > lastKbDoneCount || q.failed_count > lastKbFailCount) {
@@ -1146,7 +1160,7 @@
 
   <!-- 右侧：聊天显示区域 + 下方极简聊天框 -->
   <main class="chat-main">
-    <header class="chat-header">
+    <header class="chat-header" onmousedown={startWindowDrag}>
       <div class="header-drag" data-tauri-drag-region>
         <div class="chat-title" data-tauri-drag-region>
           {currentSession?.title ?? '新对话'}

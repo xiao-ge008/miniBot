@@ -1,6 +1,6 @@
 [package]
 name = "minibot"
-version = "0.1.15"
+version = "0.1.16"
 description = "miniBot 桌面 AI 小工具"
 authors = ["you"]
 edition = "2024"

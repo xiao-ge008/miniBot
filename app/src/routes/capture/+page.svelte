@@ -591,9 +591,10 @@
       else if (inRect(sel, p.x, p.y)) c = tool ? (tool === 'text' ? 'text' : 'crosshair') : 'move';
       else c = 'default';
     }
-    if (overlay && (currentCursor !== c || overlay.style.cursor !== c)) {
-      currentCursor = c;
-      overlay.style.cursor = c;
+    const displayCursor = softwareCursor ? 'none' : c;
+    if (overlay && (currentCursor !== displayCursor || overlay.style.cursor !== displayCursor)) {
+      currentCursor = displayCursor;
+      overlay.style.cursor = displayCursor;
     }
   }
 
@@ -882,7 +883,7 @@
     qrCount = 0;
     hoverWin = null;
     currentCursor = '';
-    if (overlay) overlay.style.cursor = 'crosshair';
+    if (overlay) overlay.style.cursor = softwareCursor ? 'none' : 'crosshair';
     img = null;
     pixels = null;
     if (prevBlobUrl) {
@@ -1065,7 +1066,8 @@
 
   onMount(() => {
     isWindows = navigator.userAgent.includes('Windows');
-    try { softwareCursor = isWindows && localStorage.getItem(CURSOR_STORAGE_KEY) === '1'; } catch { /* 使用系统光标 */ }
+    // 部分 Windows 显卡/WebView2 组合会冻结全屏遮罩上的系统光标；默认用软件光标覆盖，F8 可切换回系统光标。
+    try { softwareCursor = isWindows && localStorage.getItem(CURSOR_STORAGE_KEY) !== '0'; } catch { softwareCursor = isWindows; }
     const un = onPayload(load);
     let unReset: (() => void) | undefined;
     let disposed = false;
@@ -1188,8 +1190,8 @@
 
 <div class="root">
   {#if isWindows}
-    <button class="cursor-toggle" class:enabled={softwareCursor} aria-pressed={softwareCursor} onclick={toggleSoftwareCursor} title="鼠标指针不跟手时开启软件光标，快捷键 F8">
-      {softwareCursor ? '软件光标已开启 · F8' : '光标异常？按 F8'}
+    <button class="cursor-toggle" class:enabled={softwareCursor} aria-pressed={softwareCursor} onclick={toggleSoftwareCursor} title="按 F8 切换系统光标与软件光标">
+      {softwareCursor ? '软件光标已开启 · F8' : '系统光标已开启 · F8切换'}
     </button>
   {/if}
   <div class="software-cursor" bind:this={softwareCursorElement} aria-hidden="true">

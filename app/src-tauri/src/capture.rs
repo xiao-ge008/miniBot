@@ -28,6 +28,18 @@ pub fn start(app: &AppHandle, mode: &str) {
     let app = app.clone();
     let mode = mode.to_owned();
     std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        if !crate::winutil::check_screen_capture_permission() {
+            let _ = crate::winutil::request_screen_capture_permission();
+            if !crate::winutil::check_screen_capture_permission() {
+                let help_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    crate::winutil::show_screen_capture_permission_help();
+                    fail(&help_app, &id, "未获得屏幕录制权限，请授权后重新截图");
+                });
+                return;
+            }
+        }
         let hwnd = crate::winutil::foreground_hwnd();
         let src = crate::winutil::foreground_process();
         let (cx, cy) = crate::winutil::cursor_pos();
@@ -71,18 +83,10 @@ pub fn start(app: &AppHandle, mode: &str) {
         let img = match mon.capture_image() {
             Ok(img) if img.width() > 0 && img.height() > 0 => img,
             Ok(_) => {
-                #[cfg(target_os = "macos")]
-                if !crate::winutil::check_screen_capture_permission() {
-                    let _ = crate::winutil::request_screen_capture_permission();
-                }
                 fail(&app, &id, "屏幕捕获返回空图像");
                 return;
             }
             Err(e) => {
-                #[cfg(target_os = "macos")]
-                if !crate::winutil::check_screen_capture_permission() {
-                    let _ = crate::winutil::request_screen_capture_permission();
-                }
                 fail(&app, &id, &format!("屏幕捕获失败: {e}"));
                 return;
             }
@@ -240,10 +244,10 @@ pub fn ready(app: &AppHandle, id: &str) {
         };
         let result = (|| -> tauri::Result<()> {
             w.set_always_on_top(true)?;
-            w.show()?;
-            w.set_focus()?;
             #[cfg(windows)]
             crate::winutil::prepare_capture_window(crate::wins::hwnd_of(&w));
+            w.show()?;
+            w.set_focus()?;
             Ok(())
         })();
         if let Err(e) = result {

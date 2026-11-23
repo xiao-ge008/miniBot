@@ -388,6 +388,29 @@ impl LlmManager {
             && hw.vram_gb >= 1.8;
         let has_metal = hw.gpu_vendor == "apple";
 
+        // llama.cpp 在 CUDA 运行库缺失时可能仍能启动，但会悄悄退回 CPU；启动前主动探测设备，避免用户得到极慢且无提示的结果。
+        #[cfg(windows)]
+        if has_cuda {
+            let probe = Command::new(server)
+                .arg("--list-devices")
+                .current_dir(engine_dir)
+                .output()
+                .await
+                .map_err(|e| LlmError::Other {
+                    message: format!("无法检查 CUDA 后端：{e}"),
+                })?;
+            let probe_text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&probe.stdout),
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            if !probe.status.success() || !probe_text.contains("CUDA") {
+                return Err(LlmError::Other {
+                    message: "检测到 NVIDIA 显卡，但 llama.cpp 未加载 CUDA 后端。请在本地引擎目录补齐与当前 ggml-cuda.dll 匹配的 CUDA 运行库（通常包括 cudart64_12.dll、cublas64_12.dll、cublasLt64_12.dll），然后重试。".into(),
+                });
+            }
+        }
+
         let ngl = if has_cuda || has_vulkan || has_metal {
             cfg.ngl.clamp(0, 999).to_string()
         } else {

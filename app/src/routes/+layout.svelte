@@ -3,12 +3,12 @@
   import { page } from '$app/state';
   import '$lib/styles.css';
   import { onMount } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { getSafeCurrentWindow } from '$lib/core/window';
   import { ipc, onSettings } from '$lib/core/ipc';
   import type { Settings } from '$lib/core/types';
 
   let { children } = $props();
-  const win = getCurrentWindow();
+  const win = getSafeCurrentWindow();
   const tabs = [
     { label: '聊天', href: '/launcher' },
     { label: '快传', href: '/localsend' },

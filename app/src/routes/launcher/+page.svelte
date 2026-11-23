@@ -5,7 +5,7 @@
   // 2. 右侧：多轮流式对话显示区（支持 <think> 思考过程折叠/展开）+ 底部极简输入框
   // 3. 多模态：支持图片与视频上传/粘贴/拖拽识别（视频自动均匀抽取 6 帧时序故事板供视觉模型识别）
   import { onMount, tick } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { getSafeCurrentWindow } from '$lib/core/window';
   import {
     formatChatStats,
     formatSearchContext,
@@ -42,7 +42,7 @@
     UpdateInfo,
   } from '$lib/core/types';
 
-  const win = getCurrentWindow();
+  const win = getSafeCurrentWindow();
 
   // 会话与消息状态
   let sessions = $state<ChatSession[]>([]);

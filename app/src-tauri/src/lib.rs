@@ -185,9 +185,6 @@ pub fn run() {
                 p.kind = payload::PayloadKind::File;
                 p.meta = serde_json::json!({ "files": ls_paths });
                 wins::open_localsend(&handle, p);
-            } else if !is_autostart {
-                // 手动双击启动（非开机自启静默模式）时，自动打开 AI 聊天主窗口
-                wins::open_launcher(&handle);
             }
 
             // 划词/截图临时历史清理（默认保留一个月 30 天，不影响永久 AI 聊天记录）：启动时一次，之后每 24 小时

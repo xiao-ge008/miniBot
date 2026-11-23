@@ -437,7 +437,19 @@ impl LlmManager {
             args.push("--mmproj".into());
             args.push(cfg.mmproj_path.clone());
         }
-        args.extend(cfg.extra_args.split_whitespace().map(String::from));
+
+        // 统一启用 llama.cpp 的 Jinja 聊天模板引擎。不同模型的模板由 GGUF 元数据决定，
+        // 不按模型文件名写死；如遇特殊模型需要关闭，可在该模型的额外参数中传 --no-jinja。
+        let extra_args = cfg.extra_args.split_whitespace().map(String::from).collect::<Vec<_>>();
+        if !extra_args.iter().any(|arg| arg == "--no-jinja" || arg == "--jinja") {
+            args.push("--jinja".into());
+        }
+        if cfg.reasoning_effort.trim() != "off"
+            && !extra_args.iter().any(|arg| arg == "--reasoning-preserve" || arg == "--no-reasoning-preserve")
+        {
+            args.push("--reasoning-preserve".into());
+        }
+        args.extend(extra_args);
 
         let log_path = app.path().app_log_dir().unwrap_or_default().join("engine.log");
         let _ = std::fs::create_dir_all(log_path.parent().unwrap());

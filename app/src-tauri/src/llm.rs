@@ -391,14 +391,18 @@ impl LlmManager {
         // llama.cpp 在 CUDA 运行库缺失时可能仍能启动，但会悄悄退回 CPU；启动前主动探测设备，避免用户得到极慢且无提示的结果。
         #[cfg(windows)]
         if has_cuda {
-            let probe = Command::new(server)
+            let mut probe_cmd = Command::new(server);
+            probe_cmd
                 .arg("--list-devices")
                 .current_dir(engine_dir)
-                .output()
-                .await
-                .map_err(|e| LlmError::Other {
-                    message: format!("无法检查 CUDA 后端：{e}"),
-                })?;
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            #[cfg(windows)]
+            probe_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            let probe = probe_cmd.output().await.map_err(|e| LlmError::Other {
+                message: format!("无法检查 CUDA 后端：{e}"),
+            })?;
             let probe_text = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&probe.stdout),
